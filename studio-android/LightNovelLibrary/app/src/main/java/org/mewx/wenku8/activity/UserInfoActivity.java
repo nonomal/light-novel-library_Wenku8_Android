@@ -11,21 +11,26 @@ import android.view.View;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.afollestad.materialdialogs.GravityEnum;
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.firebase.analytics.FirebaseAnalytics;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 import com.makeramen.roundedimageview.RoundedImageView;
 
 import org.mewx.wenku8.R;
+import org.mewx.wenku8.account.AccountInfoLoader;
 import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.global.api.UserInfo;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.global.api.Wenku8Error;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8Error;
 import org.mewx.wenku8.util.LightCache;
-import org.mewx.wenku8.util.LightNetwork;
+import org.mewx.wenku8.network.LightNetwork;
 import org.mewx.wenku8.util.LightTool;
-import org.mewx.wenku8.util.LightUserSession;
+import org.mewx.wenku8.network.LightUserSession;
+import org.mewx.wenku8.util.ProgressDialogHelper;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.UnsupportedEncodingException;
 
@@ -43,14 +48,13 @@ public class UserInfoActivity extends BaseMaterialActivity {
     private UserInfo ui;
     private AsyncGetUserInfo agui;
 
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         initMaterialStyle(R.layout.layout_account_info);
 
         // Init Firebase Analytics on GA4.
-        mFirebaseAnalytics = FirebaseAnalytics.getInstance(this);
+        mFirebaseAnalytics = GoogleServicesHelper.initFirebase(this);
 
         // get views
         rivAvatar = findViewById(R.id.user_avatar);
@@ -61,166 +65,200 @@ public class UserInfoActivity extends BaseMaterialActivity {
         tvRank = findViewById(R.id.rank);
         tvLogout = findViewById(R.id.btn_logout);
 
+        loadCachedAvatarInitially();
+
         // sync get info
         agui = new AsyncGetUserInfo();
         agui.execute();
 
     }
 
-    private class AsyncGetUserInfo extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
-        private int operation; // 0 is fetch data, 1 is sign
-        MaterialDialog md;
+    private void loadCachedAvatarInitially() {
+        // Spin up a quick background thread so we don't freeze the main UI
+        new Thread(() -> {
+            String avatarPath = null;
+            
+            // Check which cache file exists
+            if (LightCache.testFileExist(GlobalConfig.getFirstUserAvatarSaveFilePath())) {
+                avatarPath = GlobalConfig.getFirstUserAvatarSaveFilePath();
+            } else if (LightCache.testFileExist(GlobalConfig.getSecondUserAvatarSaveFilePath())) {
+                avatarPath = GlobalConfig.getSecondUserAvatarSaveFilePath();
+            }
+
+            // If we found a cached file, decode it
+            if (avatarPath != null) {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inSampleSize = 2; // Keep the same memory-saving compression
+                Bitmap cachedBitmap = BitmapFactory.decodeFile(avatarPath, options);
+
+                // If decoding succeeded, push it to the UI thread to display
+                if (cachedBitmap != null) {
+                    runOnUiThread(() -> {
+                        if (rivAvatar != null) {
+                            rivAvatar.setImageBitmap(cachedBitmap);
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    // The result type is an Object array so we can pass back both the ErrorCode AND the Bitmap/UserInfo cleanly
+    private class AsyncGetUserInfo extends AsyncTask<Integer, Void, Object[]> {
+        private boolean isSignOperation;
+        private ProgressDialogHelper md;
 
         @Override
         protected void onPreExecute() {
             super.onPreExecute();
-
-            operation = 0; // init
-            md = new MaterialDialog.Builder(UserInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .content(R.string.system_fetching)
-                    .progress(true, 0)
-                    .cancelable(false)
-                    .show();
+            md = ProgressDialogHelper.show(UserInfoActivity.this,
+                    R.string.system_fetching,
+                    /* indeterminate= */ true, /* cancelable= */ false, /* cancelListener= */ null);
         }
 
+        /**
+         * The decision about what to show lives in {@link AccountInfoLoader}, which is covered by
+         * JVM tests; what stays here is the part that genuinely needs Android — decoding the
+         * avatar and writing it to the disk cache.
+         */
         @Override
-        protected Wenku8Error.ErrorCode doInBackground(Integer... params) {
-            if(params.length == 1 && params[0] == 1) {
-                // do sign, then fetch all data
-                operation = 1;
-                byte[] b = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, Wenku8API.getUserSignParams());
-                if(b == null) return Wenku8Error.ErrorCode.NETWORK_ERROR;
-                try {
-                    if(!LightTool.isInteger(new String(b))) return Wenku8Error.ErrorCode.STRING_CONVERSION_ERROR;
-                    else if(Wenku8Error.getSystemDefinedErrorCode(Integer.valueOf(new String(b))) == Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED)
-                        return Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED;
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-
-            }
+        protected Object[] doInBackground(Integer... params) {
+            isSignOperation = (params.length == 1 && params[0] == 1);  // 0 is fetch data, 1 is sign
 
             try {
-                // try fetch
-                byte[] b = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, Wenku8API.getUserInfoParams());
-                if(b == null) return Wenku8Error.ErrorCode.NETWORK_ERROR;
+                AccountInfoLoader.Result result =
+                        AccountInfoLoader.load(isSignOperation, new AccountInfoLoader.Backend() {
+                            @Nullable
+                            @Override
+                            public byte[] sendSignRequest() {
+                                return LightNetwork.LightHttpPostConnection(
+                                        Wenku8API.BASE_URL, Wenku8API.getUserSignParams());
+                            }
 
-                String xml = new String(b, "UTF-8");
-                if(LightTool.isInteger(xml)) {
-                    if(Wenku8Error.getSystemDefinedErrorCode(Integer.valueOf(xml)) == Wenku8Error.ErrorCode.SYSTEM_4_NOT_LOGGED_IN) {
-                        // do log in
-                        Wenku8Error.ErrorCode temp = LightUserSession.doLoginFromFile();
-                        if(temp != Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED) return temp; // return an error code
+                            @Nullable
+                            @Override
+                            public byte[] sendInfoRequest() {
+                                return LightNetwork.LightHttpPostConnection(
+                                        Wenku8API.BASE_URL, Wenku8API.getUserInfoParams());
+                            }
 
-                        // rquest again
-                        b = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, Wenku8API.getUserInfoParams());
-                        if(b == null) return Wenku8Error.ErrorCode.NETWORK_ERROR;
-                        xml = new String(b, "UTF-8");
-                    }
-                    else return Wenku8Error.getSystemDefinedErrorCode(Integer.valueOf(xml));
-                }
+                            @NonNull
+                            @Override
+                            public Wenku8Error.ErrorCode restoreSession() {
+                                return LightUserSession.doLoginFromFile(
+                                        GlobalConfig::loadUserInfoSet);
+                            }
 
-                Log.d("MewX", xml);
-                ui = UserInfo.parseUserInfo(xml);
-                if(ui == null) return Wenku8Error.ErrorCode.XML_PARSE_FAILED;
+                            @Nullable
+                            @Override
+                            public byte[] downloadAvatar(int uid) {
+                                return LightNetwork.LightHttpDownload(Wenku8API.getAvatarURL(uid));
+                            }
 
-                return Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED;
+                            @NonNull
+                            @Override
+                            public Wenku8Error.ErrorCode serverCode(int raw) {
+                                return Wenku8Error.getSystemDefinedErrorCode(raw);
+                            }
+                        });
+
+                return new Object[]{result.code, result.userInfo, cacheAndDecode(result.avatar)};
+
             } catch (Exception e) {
-                e.printStackTrace();
-                return Wenku8Error.ErrorCode.STRING_CONVERSION_ERROR;
+                CrashReporter.recordException("UserInfoActivity.AsyncGetUserInfo", e);
+                return new Object[]{Wenku8Error.ErrorCode.NETWORK_ERROR, null, null};
             }
         }
 
-        @Override
-        protected void onPostExecute(Wenku8Error.ErrorCode errorCode) {
-            super.onPostExecute(errorCode);
-
-            md.dismiss();
-            if(operation == 1) {
-                // Analysis.
-                Bundle checkInParams = new Bundle();
-                checkInParams.putString("effective_click", "" + (errorCode != Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED));
-                mFirebaseAnalytics.logEvent("daily_check_in", checkInParams);
-
-                // fetch from sign
-                if(errorCode == Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED)
-                    Toast.makeText(UserInfoActivity.this, getResources().getString(R.string.userinfo_sign_failed), Toast.LENGTH_SHORT).show();
-                else
-                    Toast.makeText(UserInfoActivity.this, getResources().getString(R.string.userinfo_sign_successful), Toast.LENGTH_SHORT).show();
-                return; // just return
+        /**
+         * Decodes the freshly downloaded avatar and keeps a copy for the next offline launch.
+         * Decoding from the bytes rather than from the file that was just written is deliberate:
+         * it guarantees the screen shows what was downloaded even if the write failed.
+         */
+        @Nullable
+        private Bitmap cacheAndDecode(@Nullable byte[] avatarBytes) {
+            if (avatarBytes == null) {
+                return null;
             }
 
-            if(errorCode == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED) {
-                // show avatar
-                String avatarPath;
-                if(LightCache.testFileExist(GlobalConfig.getFirstUserAvatarSaveFilePath()))
-                    avatarPath = GlobalConfig.getFirstUserAvatarSaveFilePath();
-                else
-                    avatarPath = GlobalConfig.getSecondUserAvatarSaveFilePath();
-                BitmapFactory.Options options = new BitmapFactory.Options();
-                options.inSampleSize = 2;
-                Bitmap bm = BitmapFactory.decodeFile(avatarPath, options);
-                if(bm != null)
-                    rivAvatar.setImageBitmap(bm);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 2;
+            Bitmap decoded = BitmapFactory.decodeByteArray(
+                    avatarBytes, 0, avatarBytes.length, options);
 
-                // set texts
+            if (!LightCache.saveFile(GlobalConfig.getFirstUserAvatarSaveFilePath(), avatarBytes, true)) {
+                LightCache.saveFile(GlobalConfig.getSecondUserAvatarSaveFilePath(), avatarBytes, true);
+            }
+
+            return decoded;
+        }
+
+        @Override
+        protected void onPostExecute(Object[] result) {
+            super.onPostExecute(result);
+
+            // Dismissed ahead of the guard: ProgressDialogHelper.dismiss() is already safe on
+            // a gone window, and skipping it would leak the dialog rather than crash on it.
+            if (md != null) md.dismiss();
+
+            if (isFinishing() || isDestroyed()) return;
+
+            Wenku8Error.ErrorCode errorCode = (Wenku8Error.ErrorCode) result[0];
+            UserInfo fetchedUi = (UserInfo) result[1];
+            Bitmap fetchedAvatar = (Bitmap) result[2];
+
+            // Analytics and Toasts for Sign Operation
+            if (isSignOperation) {
+                Bundle checkInParams = new Bundle();
+                checkInParams.putString("effective_click", "" + (errorCode != Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED));
+                GoogleServicesHelper.logEvent(mFirebaseAnalytics, "daily_check_in", checkInParams);
+
+                int toastMsg = (errorCode == Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED) ? R.string.userinfo_sign_failed : R.string.userinfo_sign_successful;
+                Toast.makeText(UserInfoActivity.this, getResources().getString(toastMsg), Toast.LENGTH_SHORT).show();
+                
+                if (errorCode == Wenku8Error.ErrorCode.SYSTEM_9_SIGN_FAILED) return;
+            }
+
+            // Apply UI Updates
+            if (errorCode == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED && fetchedUi != null) {
+                ui = fetchedUi; 
+                
+                // If the memory decode succeeded, apply it instantly
+                if (fetchedAvatar != null) {
+                    rivAvatar.setImageBitmap(fetchedAvatar);
+                }
+
                 tvUserName.setText(ui.username);
                 tvNickyName.setText(ui.nickyname);
                 tvScore.setText(Integer.toString(ui.score));
                 tvExperience.setText(Integer.toString(ui.experience));
                 tvRank.setText(ui.rank);
-                tvLogout.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        new MaterialDialog.Builder(UserInfoActivity.this)
-                                .callback(new MaterialDialog.ButtonCallback() {
-                                    @Override
-                                    public void onPositive(MaterialDialog dialog) {
-                                        super.onPositive(dialog);
-                                        AsyncLogout al = new AsyncLogout();
-                                        al.execute();
-                                    }
-                                })
-                                .theme(Theme.LIGHT)
-                                .titleColorRes(R.color.default_text_color_black)
-                                .backgroundColorRes(R.color.dlgBackgroundColor)
-                                .contentColorRes(R.color.dlgContentColor)
-                                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                                .content(R.string.dialog_content_sure_to_logout)
-                                .contentGravity(GravityEnum.CENTER)
-                                .positiveText(R.string.dialog_positive_ok)
-                                .negativeText(R.string.dialog_negative_biao)
-                                .show();
-                    }
-                });
-            }
-            else {
+                
+                tvLogout.setOnClickListener(v -> new MaterialAlertDialogBuilder(UserInfoActivity.this)
+                        .setMessage(R.string.dialog_content_sure_to_logout)
+                        .setPositiveButton(R.string.dialog_positive_ok, (dialog, which) -> new AsyncLogout().execute())
+                        .setNegativeButton(R.string.dialog_negative_biao, null)
+                        .show());
+            } else if (errorCode != Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED) {
                 Toast.makeText(UserInfoActivity.this, errorCode.toString(), Toast.LENGTH_SHORT).show();
-                UserInfoActivity.this.finish(); // end dialog
+                UserInfoActivity.this.finish();
             }
         }
     }
 
     private class AsyncLogout extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
-        MaterialDialog md;
+        private ProgressDialogHelper md;
 
         @Override
         protected void onPreExecute() {
             super.onPreExecute();
-
-            md = new MaterialDialog.Builder(UserInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .content(R.string.system_fetching)
-                    .progress(true, 0)
-                    .cancelable(false)
-                    .show();
+            md = ProgressDialogHelper.show(UserInfoActivity.this,
+                    R.string.system_fetching,
+                    /* indeterminate= */ true, /* cancelable= */ false, /* cancelListener= */ null);
         }
 
         @Override
         protected Wenku8Error.ErrorCode doInBackground(Integer... params) {
-
             byte[] b = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, Wenku8API.getUserLogoutParams());
             if(b == null) return Wenku8Error.ErrorCode.NETWORK_ERROR;
 
@@ -232,7 +270,7 @@ public class UserInfoActivity extends BaseMaterialActivity {
 
                 return Wenku8Error.getSystemDefinedErrorCode(new Integer(result)); // get 1 or 4 exceptions
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("UserInfoActivity.AsyncLogout", e);
                 return Wenku8Error.ErrorCode.BYTE_TO_STRING_EXCEPTION;
             }
         }
@@ -241,15 +279,37 @@ public class UserInfoActivity extends BaseMaterialActivity {
         protected void onPostExecute(Wenku8Error.ErrorCode errorCode) {
             super.onPostExecute(errorCode);
 
-            if(errorCode == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED || errorCode == Wenku8Error.ErrorCode.SYSTEM_4_NOT_LOGGED_IN) {
-                LightUserSession.logOut();
-                Toast.makeText(UserInfoActivity.this, "Logged out!", Toast.LENGTH_SHORT).show();
+            final boolean loggedOut = errorCode == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED
+                    || errorCode == Wenku8Error.ErrorCode.SYSTEM_4_NOT_LOGGED_IN;
+
+            // Deliberately ahead of the lifecycle guard, and the reason this method is not
+            // simply guarded at the top: clearing the session and the stored credentials is
+            // the whole point of the task. Skipping it because the user rotated or navigated
+            // away would leave them logged in with credentials still on disk -- a worse
+            // outcome than the crash the guard prevents.
+            if (loggedOut) {
+                LightUserSession.logOut(() -> {
+                    // TODO: extract this to a util.
+                    // delete files
+                    LightCache.deleteFile(GlobalConfig.getFirstFullUserAccountSaveFilePath());
+                    LightCache.deleteFile(GlobalConfig.getSecondFullUserAccountSaveFilePath());
+                    LightCache.deleteFile(GlobalConfig.getFirstUserAvatarSaveFilePath());
+                    LightCache.deleteFile(GlobalConfig.getSecondUserAvatarSaveFilePath());
+                });
             }
-            else
-                Toast.makeText(UserInfoActivity.this, errorCode.toString(), Toast.LENGTH_SHORT).show();
+
+            // Dismissed ahead of the guard; see AsyncGetUserInfo above.
+            if (md != null) {
+                md.dismiss();
+            }
+
+            if (isFinishing() || isDestroyed()) return;
+
+            Toast.makeText(UserInfoActivity.this,
+                    loggedOut ? "Logged out!" : errorCode.toString(),
+                    Toast.LENGTH_SHORT).show();
 
             // terminate this activity
-            md.dismiss();
             UserInfoActivity.this.finish();
         }
 

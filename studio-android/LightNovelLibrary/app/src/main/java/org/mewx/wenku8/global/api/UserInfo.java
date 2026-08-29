@@ -4,7 +4,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import android.util.Log;
 
-import org.mewx.wenku8.global.GlobalConfig;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.util.CrashReporter;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserFactory;
 
@@ -20,6 +21,7 @@ public class UserInfo {
      * <metadata>
      * <item name="uname"><![CDATA[apptest]]></item>
      * <item name="nickname"><![CDATA[apptest]]></item>
+     * <item name="uid">123</item>
      * <item name="score">10</item>
      * <item name="experience">10</item>
      * <item name="rank"><![CDATA[新手上路]]></item>
@@ -28,6 +30,7 @@ public class UserInfo {
 
     public String username;
     public String nickyname;
+    public int uid;
     public int score; // 现有积分
     public int experience; // 经验值
     public String rank;
@@ -53,10 +56,13 @@ public class UserInfo {
                         } else if ("item".equals(xmlPullParser.getName())) {
                             if ("uname".equals(xmlPullParser.getAttributeValue(0))) {
                                 ui.username = xmlPullParser.nextText();
-                                Log.d("MewX", ui.username.length() == 0 ? GlobalConfig.UNKNOWN : ui.username);
+                                Log.d("MewX", ui.username.isEmpty() ? Wenku8API.UNKNOWN : ui.username);
                             } else if ("nickname".equals(xmlPullParser.getAttributeValue(0))) {
                                 ui.nickyname = xmlPullParser.nextText();
-                                Log.d("MewX", ui.nickyname.length() == 0 ? GlobalConfig.UNKNOWN : ui.nickyname);
+                                Log.d("MewX", ui.nickyname.isEmpty() ? Wenku8API.UNKNOWN : ui.nickyname);
+                            } else if ("uid".equals(xmlPullParser.getAttributeValue(0))) {
+                                ui.uid = Integer.valueOf(xmlPullParser.nextText());
+                                Log.d("MewX", "uid:" + ui.uid);
                             } else if ("score".equals(xmlPullParser.getAttributeValue(0))) {
                                 ui.score = Integer.valueOf(xmlPullParser.nextText());
                                 Log.d("MewX", "score:" + ui.score);
@@ -65,16 +71,28 @@ public class UserInfo {
                                 Log.d("MewX", "experience:" + ui.experience);
                             } else if ("rank".equals(xmlPullParser.getAttributeValue(0))) {
                                 ui.rank = xmlPullParser.nextText();
-                                Log.d("MewX", ui.rank.length() == 0 ? GlobalConfig.UNKNOWN : ui.rank);
+                                Log.d("MewX", ui.rank.isEmpty() ? Wenku8API.UNKNOWN : ui.rank);
                             }
                         }
                         break;
                 }
                 eventType = xmlPullParser.next();
             }
+
+            // Until now the only way this returned null was XmlPullParser.next() throwing on
+            // malformed input. Well-formed XML that simply is not a user-info response -- an
+            // HTML maintenance page, a captive-portal or proxy interstitial, a CDN error page
+            // -- walked the loop, matched no item, and came back as a blank but non-null
+            // UserInfo. Every caller's != null check passed, so it surfaced as a logged-in
+            // user with an empty name and zero score instead of as a parse error.
+            if (ui.username == null) {
+                CrashReporter.log("parseUserInfo: well-formed XML with no uname item, "
+                        + "length=" + xml.length());
+                return null;
+            }
             return ui;
         } catch (Exception e) {
-            e.printStackTrace();
+            CrashReporter.recordException("UserInfo.parseUserInfo", e);
             return null;
         }
     }

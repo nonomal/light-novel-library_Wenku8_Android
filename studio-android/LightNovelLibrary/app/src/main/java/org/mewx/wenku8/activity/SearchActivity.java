@@ -14,10 +14,8 @@ import androidx.recyclerview.widget.DefaultItemAnimator;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.afollestad.materialdialogs.GravityEnum;
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
-import com.google.firebase.analytics.FirebaseAnalytics;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.adapter.SearchHistoryAdapter;
@@ -44,7 +42,7 @@ public class SearchActivity extends BaseMaterialActivity implements MyItemClickL
         initMaterialStyle(R.layout.layout_search, StatusBarColor.WHITE);
 
         // Init Firebase Analytics on GA4.
-        FirebaseAnalytics.getInstance(this);
+        GoogleServicesHelper.initFirebase(this);
 
         // bind views
         toolbarSearchView = findViewById(R.id.search_view);
@@ -76,7 +74,7 @@ public class SearchActivity extends BaseMaterialActivity implements MyItemClickL
         toolbarSearchView.setOnEditorActionListener((v, actionId, event) -> {
             // purify
             String temp = toolbarSearchView.getText().toString().trim();
-            if(temp.length()==0) return false;
+            if(temp.isEmpty()) return false;
 
             // real action
             //Toast.makeText(MyApp.getContext(), temp, Toast.LENGTH_SHORT).show();
@@ -129,21 +127,14 @@ public class SearchActivity extends BaseMaterialActivity implements MyItemClickL
 
     @Override
     public void onItemLongClick(View view, final int position) {
-        new MaterialDialog.Builder(this)
-                .onPositive((ignored1, ignored2) -> {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(getResources().getString(R.string.dialog_content_delete_one_search_record))
+                .setMessage(historyList.get(position))
+                .setPositiveButton(R.string.dialog_positive_likethis, (ignored1, ignored2) -> {
                     GlobalConfig.deleteSearchHistory(historyList.get(position));
                     refreshHistoryList();
                 })
-                .theme(Theme.LIGHT)
-                .backgroundColorRes(R.color.dlgBackgroundColor)
-                .contentColorRes(R.color.dlgContentColor)
-                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                .title(getResources().getString(R.string.dialog_content_delete_one_search_record))
-                .content(historyList.get(position))
-                .contentGravity(GravityEnum.CENTER)
-                .positiveText(R.string.dialog_positive_likethis)
-                .negativeText(R.string.dialog_negative_preferno)
+                .setNegativeButton(R.string.dialog_negative_preferno, null)
                 .show();
     }
 
@@ -155,11 +146,15 @@ public class SearchActivity extends BaseMaterialActivity implements MyItemClickL
         return super.onOptionsItemSelected(menuItem);
     }
 
+    /**
+     * Fades out on the way back, mirroring the fade this screen is entered with.
+     *
+     * <p>On {@code finish} rather than {@code onBackPressed}, so the system back gesture, the up
+     * arrow and any programmatic close all animate the same way through one path.
+     */
     @Override
-    public void onBackPressed() {
-        super.onBackPressed();
-
-        // leave animation: fade out
+    public void finish() {
+        super.finish();
         overridePendingTransition(0, R.anim.fade_out);
     }
 

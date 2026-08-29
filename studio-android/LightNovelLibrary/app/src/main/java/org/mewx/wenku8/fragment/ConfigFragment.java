@@ -19,8 +19,11 @@ import android.view.ViewGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
+import androidx.appcompat.widget.SwitchCompat;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
+import org.mewx.wenku8.util.ProgressDialogHelper;
 
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.activity.AboutActivity;
@@ -29,10 +32,11 @@ import org.mewx.wenku8.activity.MenuBackgroundSelectorActivity;
 import org.mewx.wenku8.async.CheckAppNewVersion;
 import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.global.api.OldNovelContentParser;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.global.api.Wenku8Error;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8Error;
 import org.mewx.wenku8.util.LightCache;
 import org.mewx.wenku8.util.LightTool;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.File;
 import java.io.UnsupportedEncodingException;
@@ -42,11 +46,6 @@ import java.util.List;
 import java.util.Objects;
 
 public class ConfigFragment extends Fragment {
-
-    public static ConfigFragment newInstance() {
-        return new ConfigFragment();
-    }
-
     public ConfigFragment() {
         // Required empty public constructor
     }
@@ -69,7 +68,7 @@ public class ConfigFragment extends Fragment {
 
         // get views
         TextView tvNotice = Objects.requireNonNull(getActivity()).findViewById(R.id.notice);
-        if(Wenku8API.NoticeString.equals(""))
+        if(Wenku8API.NoticeString.isEmpty())
             getActivity().findViewById(R.id.notice_layout).setVisibility(View.GONE);
         else {
             CharSequence sequence = Html.fromHtml(Wenku8API.NoticeString.trim());
@@ -87,6 +86,7 @@ public class ConfigFragment extends Fragment {
                 int flags = strBuilder.getSpanFlags(span);
                 ClickableSpan clickable = new ClickableSpan() {
                     public void onClick(View view) {
+                        // TODO: Parse the href from the <a> tag and use the real URL for links.
                         // Do something with span.getURL() to handle the link click...
                         Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(GlobalConfig.blogPageUrl));
                         Objects.requireNonNull(getContext()).startActivity(browserIntent);
@@ -99,14 +99,11 @@ public class ConfigFragment extends Fragment {
             tvNotice.setMovementMethod(LinkMovementMethod.getInstance());
         }
 
-        getActivity().findViewById(R.id.btn_choose_language).setOnClickListener(v -> new MaterialDialog.Builder(getActivity())
-                .theme(Theme.LIGHT)
-                .title(R.string.config_choose_language)
-                .content(R.string.dialog_content_language_tip)
-                .items(R.array.choose_language_option)
-                .itemsCallback((dialog, view, which, text) -> {
+        getActivity().findViewById(R.id.btn_choose_language).setOnClickListener(v -> new MaterialAlertDialogBuilder(getActivity())
+                .setTitle(R.string.config_choose_language)
+                .setItems(R.array.choose_language_option, (dialog, which) -> {
                     // 0 means Simplified Chinese; 1 means Traditional Chinese.
-                    Wenku8API.LANG selected = which == 0 ? Wenku8API.LANG.SC : Wenku8API.LANG.TC;
+                    Wenku8API.AppLanguage selected = which == 0 ? Wenku8API.AppLanguage.SC : Wenku8API.AppLanguage.TC;
                     if (selected == GlobalConfig.getCurrentLang()) {
                         Toast.makeText(getActivity(), "Already in.", Toast.LENGTH_SHORT).show();
                         return;
@@ -121,11 +118,9 @@ public class ConfigFragment extends Fragment {
                     getActivity().finish(); // destroy itself
                 })
                 .show());
-        getActivity().findViewById(R.id.btn_clear_cache).setOnClickListener(v -> new MaterialDialog.Builder(getActivity())
-                .theme(Theme.LIGHT)
-                .title(R.string.config_clear_cache)
-                .items(R.array.wipe_cache_option)
-                .itemsCallback((dialog, view, which, text) -> {
+        getActivity().findViewById(R.id.btn_clear_cache).setOnClickListener(v -> new MaterialAlertDialogBuilder(getActivity())
+                .setTitle(R.string.config_clear_cache)
+                .setItems(R.array.wipe_cache_option, (dialog, which) -> {
                     if (which == 0) {
                         new AsyncDeleteFast(getActivity()).execute();
                     } else if (which == 1) {
@@ -137,6 +132,14 @@ public class ConfigFragment extends Fragment {
             Intent intent = new Intent(getActivity(), MenuBackgroundSelectorActivity.class);
             startActivity(intent);
         });
+        
+        // E-ink mode switch.
+        SwitchCompat switchEinkMode = getActivity().findViewById(R.id.switch_eink_mode);
+        switchEinkMode.setChecked(GlobalConfig.isEinkModeEnabled());
+        switchEinkMode.setOnCheckedChangeListener((unusedButtonView, checked) -> {
+            GlobalConfig.setToAllSetting(GlobalConfig.SettingItems.eink_mode, checked ? "1" : "0");
+        });
+        
         getActivity().findViewById(R.id.btn_check_update).setOnClickListener(v -> {
             new CheckAppNewVersion(getActivity(), true).execute();
         });
@@ -148,7 +151,7 @@ public class ConfigFragment extends Fragment {
 
     private static class AsyncDeleteFast extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
         private WeakReference<Context> contextWeakReference;
-        private MaterialDialog md;
+        private ProgressDialogHelper md;
 
         AsyncDeleteFast(Context context) {
             this.contextWeakReference = new WeakReference<>(context);
@@ -159,13 +162,9 @@ public class ConfigFragment extends Fragment {
             super.onPreExecute();
             Context ctx = contextWeakReference.get();
             if (ctx != null) {
-                md = new MaterialDialog.Builder(ctx)
-                        .theme(Theme.LIGHT)
-                        .title(R.string.config_clear_cache)
-                        .content(R.string.dialog_content_wipe_cache_fast)
-                        .progress(true, 0)
-                        .cancelable(false)
-                        .show();
+                md = ProgressDialogHelper.show(ctx,
+                        ctx.getString(R.string.dialog_content_wipe_cache_fast),
+                        /* indeterminate= */ true, /* cancelable= */ false, /* cancelListener= */ null);
             }
         }
 
@@ -213,7 +212,7 @@ public class ConfigFragment extends Fragment {
 
     private static class AsyncDeleteSlow extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
         private WeakReference<Context> contextWeakReference;
-        private MaterialDialog md;
+        private ProgressDialogHelper md;
         private boolean isLoading = false;
 
         AsyncDeleteSlow(Context context) {
@@ -225,17 +224,13 @@ public class ConfigFragment extends Fragment {
             super.onPreExecute();
             Context ctx = contextWeakReference.get();
             if (ctx != null) {
-                md = new MaterialDialog.Builder(Objects.requireNonNull(ctx))
-                        .theme(Theme.LIGHT)
-                        .cancelListener(dialog -> {
+                md = ProgressDialogHelper.show(ctx,
+                        ctx.getString(R.string.dialog_content_wipe_cache_slow),
+                        /* indeterminate= */ true, /* cancelable= */ true,
+                        /* cancelListener= */ dialog -> {
                             isLoading = false;
                             AsyncDeleteSlow.this.cancel(true);
-                        })
-                        .title(R.string.config_clear_cache)
-                        .content(R.string.dialog_content_wipe_cache_slow)
-                        .progress(true, 0)
-                        .cancelable(true)
-                        .show();
+                        });
             }
             isLoading = true;
         }
@@ -283,7 +278,7 @@ public class ConfigFragment extends Fragment {
                         List<OldNovelContentParser.NovelContent> list = OldNovelContentParser.NovelContentParser_onlyImage(new String(temp, "UTF-8"));
                         for(OldNovelContentParser.NovelContent nv : list) listPicture.add(GlobalConfig.generateImageFileNameByURL(nv.content));
                     } catch (UnsupportedEncodingException e) {
-                        e.printStackTrace();
+                        CrashReporter.recordException("ConfigFragment.doInBackground", e);
                     }
                 }
             }

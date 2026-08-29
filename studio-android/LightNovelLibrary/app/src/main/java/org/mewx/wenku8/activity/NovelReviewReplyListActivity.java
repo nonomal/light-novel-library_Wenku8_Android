@@ -25,15 +25,17 @@ import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.google.android.material.snackbar.Snackbar;
-import com.google.firebase.analytics.FirebaseAnalytics;
+import org.mewx.wenku8.util.GoogleServicesHelper;
+import org.mewx.wenku8.util.LightTool;
 
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.adapter.ReviewReplyItemAdapter;
 import org.mewx.wenku8.global.api.ReviewReplyList;
-import org.mewx.wenku8.global.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8API;
 import org.mewx.wenku8.global.api.Wenku8Parser;
 import org.mewx.wenku8.listener.MyItemLongClickListener;
-import org.mewx.wenku8.util.LightNetwork;
+import org.mewx.wenku8.network.LightNetwork;
+import org.mewx.wenku8.network.LightUserSession;
 
 import java.lang.ref.WeakReference;
 import java.nio.charset.Charset;
@@ -69,7 +71,7 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
         initMaterialStyle(R.layout.layout_novel_review_reply_list);
 
         // Init Firebase Analytics on GA4.
-        FirebaseAnalytics.getInstance(this);
+        GoogleServicesHelper.initFirebase(this);
 
         // fetch values
         rid = getIntent().getIntExtra("rid", 1);
@@ -106,6 +108,10 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
         mSwipeRefreshLayout.setOnRefreshListener(this::refreshReviewReplyList);
 
         llReplyButton.setOnClickListener(ignored -> {
+            if (!LightUserSession.getLogStatus()) {
+                Toast.makeText(this, R.string.system_not_logged_in, Toast.LENGTH_SHORT).show();
+                return;
+            }
             String temp = etReplyText.getText().toString();
             String badWord = Wenku8API.searchBadWords(temp);
             if (badWord != null) {
@@ -215,7 +221,7 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
                 if (reviewReplyList.getCurrentPage() < reviewReplyList.getTotalPage()) {
                     // load more toast
                     Snackbar.make(mRecyclerView, getResources().getString(R.string.list_loading)
-                                    + "(" + Integer.toString(reviewReplyList.getCurrentPage() + 1) + "/" + reviewReplyList.getTotalPage() + ")",
+                                    + "(" + (reviewReplyList.getCurrentPage() + 1) + "/" + reviewReplyList.getTotalPage() + ")",
                             Snackbar.LENGTH_SHORT).show();
 
                     new AsyncReviewReplyListLoader(NovelReviewReplyListActivity.this, mSwipeRefreshLayout, rid, reviewReplyList).execute();
@@ -276,12 +282,18 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
             // refresh everything when required
             if (!runOrNot) return;
 
+            // See NovelReviewListActivity: a non-null WeakReference can still be a destroyed
+            // Activity, so treat that as gone.
             NovelReviewReplyListActivity tempActivity = novelReviewListActivityWeakReference.get();
+            if (!LightTool.isAlive(tempActivity)) tempActivity = null;
+
             if (metNetworkIssue) {
                 // met net work issue, show retry button
                 if (tempActivity != null) tempActivity.showRetryButton();
-            } else {
+            } else if (tempActivity != null) {
                 // all good, update list
+                // The null check was missing on this branch while the one above had it, so a
+                // collected Activity NPE'd here rather than being skipped.
                 if (tempActivity.getAdapter() == null) {
                     ReviewReplyItemAdapter reviewReplyItemAdapter = new ReviewReplyItemAdapter(reviewReplyList);
                     tempActivity.setAdapter(reviewReplyItemAdapter);
@@ -301,7 +313,6 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
             isLoading.set(false);
         }
     }
-
 
     private static class AsyncPublishReply extends AsyncTask<String, Void, Integer> {
         private static AtomicBoolean isLoading = new AtomicBoolean(false);
@@ -347,6 +358,8 @@ public class NovelReviewReplyListActivity extends BaseMaterialActivity implement
             if (runOrNot) {
                 EditText editText = editTextWeakReference.get();
                 NovelReviewReplyListActivity activity = activityWeakReference.get();
+                if (!LightTool.isAlive(activity)) activity = null;
+
                 switch (i) {
                     case 1:
                         // successful -> clear and enable edit text

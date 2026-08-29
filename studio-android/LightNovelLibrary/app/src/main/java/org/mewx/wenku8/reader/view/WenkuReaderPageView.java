@@ -13,7 +13,6 @@ import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.BitmapDrawable;
 import android.os.AsyncTask;
-import android.os.Build;
 import android.text.TextPaint;
 import android.util.Log;
 import android.util.Pair;
@@ -27,10 +26,11 @@ import org.mewx.wenku8.MyApp;
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.activity.ViewImageDetailActivity;
 import org.mewx.wenku8.global.GlobalConfig;
-import org.mewx.wenku8.global.api.Wenku8Error;
+import org.mewx.wenku8.api.Wenku8Error;
 import org.mewx.wenku8.reader.loader.WenkuReaderLoader;
 import org.mewx.wenku8.reader.setting.WenkuReaderSettingV1;
 import org.mewx.wenku8.util.LightTool;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,11 +60,6 @@ public class WenkuReaderPageView extends View {
     }
 
     // class
-    private class LineInfo {
-        WenkuReaderLoader.ElementType type;
-        String text;
-    }
-    List<LineInfo> lineInfoList;
     private class BitmapInfo {
         int idxLineInfo;
         int width, height;
@@ -88,16 +83,16 @@ public class WenkuReaderPageView extends View {
     private int lineCount;
 
     // background
-    static private Bitmap bmBackgroundYellow, bmTextureYellow[];
+    static private final Random random = new Random();
+    static private Bitmap bmBackgroundYellow;
+    private static final int[] bmTextureYellowResourceIds = new int[]{
+            R.drawable.reader_bg_yellow1,
+            R.drawable.reader_bg_yellow2,
+            R.drawable.reader_bg_yellow3,
+    };
     static private BitmapDrawable bmdBackground;
-    static private Random random = new Random();
     static private boolean isBackgroundSet = false;
-
-    // vars
-    private int firstLineIndex;
-    private int firstWordIndex;
-    private int lastLineIndex;
-    private int lastWordIndex; // last paragraph's last word's index
+    private final WenkuReaderPaginator paginator;
 
     // view components (battery, page number, etc.)
 
@@ -127,7 +122,7 @@ public class WenkuReaderPageView extends View {
             if(mSetting.getUseCustomFont()) typeface = Typeface.createFromFile(mSetting.getCustomFontPath()); // custom font
         }
         catch (Exception e) {
-            Toast.makeText(MyApp.getContext(), e.toString() + "\n可能的原因有：字体文件不在内置SD卡；内存太小字体太大，请使用简体中文字体，而不是CJK或GBK，谢谢，此功能为试验性功能；", Toast.LENGTH_SHORT).show();
+            Toast.makeText(MyApp.getContext(), e + "\n可能的原因有：字体文件不在内置SD卡；内存太小字体太大，请使用简体中文字体，而不是CJK或GBK，谢谢，此功能为试验性功能；", Toast.LENGTH_SHORT).show();
         }
         textPaint = new TextPaint();
         textPaint.setColor(getInDayMode() ? mSetting.fontColorDark : mSetting.fontColorLight);
@@ -148,20 +143,17 @@ public class WenkuReaderPageView extends View {
         // load bitmap
         if(forceMode || !isBackgroundSet) {
             screenSize = LightTool.getRealScreenSize(MyApp.getContext());
-            if(Build.VERSION.SDK_INT < 19) {
-                screenSize.y -= LightTool.getStatusBarHeightValue(MyApp.getContext());
-            }
 
             if(mSetting.getPageBackgroundType() == WenkuReaderSettingV1.PAGE_BACKGROUND_TYPE.CUSTOM) {
                 try {
-                    bmBackgroundYellow = BitmapFactory.decodeFile(mSetting.getPageBackgrounCustomPath());
+                    bmBackgroundYellow = BitmapFactory.decodeFile(mSetting.getPageBackgroundCustomPath());
                 } catch (OutOfMemoryError oome) {
                     try {
                         BitmapFactory.Options options = new BitmapFactory.Options();
                         options.inSampleSize = 2;
-                        bmBackgroundYellow = BitmapFactory.decodeFile(mSetting.getPageBackgrounCustomPath(), options);
+                        bmBackgroundYellow = BitmapFactory.decodeFile(mSetting.getPageBackgroundCustomPath(), options);
                     } catch(Exception e) {
-                        e.printStackTrace();
+                        CrashReporter.recordException("WenkuReaderPageView.setViewComponents", e);
                         return;
                     }
                 }
@@ -170,12 +162,9 @@ public class WenkuReaderPageView extends View {
             if(mSetting.getPageBackgroundType() == WenkuReaderSettingV1.PAGE_BACKGROUND_TYPE.SYSTEM_DEFAULT || bmBackgroundYellow == null) {
                 // use system default
                 bmBackgroundYellow = BitmapFactory.decodeResource(MyApp.getContext().getResources(), R.drawable.reader_bg_yellow_edge);
-                bmTextureYellow = new Bitmap[3];
-                bmTextureYellow[0] = BitmapFactory.decodeResource(MyApp.getContext().getResources(), R.drawable.reader_bg_yellow1);
-                bmTextureYellow[1] = BitmapFactory.decodeResource(MyApp.getContext().getResources(), R.drawable.reader_bg_yellow2);
-                bmTextureYellow[2] = BitmapFactory.decodeResource(MyApp.getContext().getResources(), R.drawable.reader_bg_yellow3);
-
-                bmdBackground = new BitmapDrawable(MyApp.getContext().getResources(), bmTextureYellow[random.nextInt(bmTextureYellow.length)]);
+                Bitmap bmTexturePattern = BitmapFactory.decodeResource(MyApp.getContext().getResources(),
+                        bmTextureYellowResourceIds[random.nextInt(bmTextureYellowResourceIds.length)]);
+                bmdBackground = new BitmapDrawable(MyApp.getContext().getResources(), bmTexturePattern);
                 bmdBackground.setTileModeXY(Shader.TileMode.REPEAT, Shader.TileMode.REPEAT);
                 bmdBackground.setBounds(0, 0, screenSize.x, screenSize.y);
             }
@@ -188,8 +177,8 @@ public class WenkuReaderPageView extends View {
      * If textPaint is null, then do nothing.
      */
     static public void resetTextColor() {
-        textPaint.setColor(getInDayMode() ? mSetting.fontColorDark : mSetting.fontColorLight);
-        widgetTextPaint.setColor(getInDayMode() ? mSetting.fontColorDark : mSetting.fontColorLight);
+        textPaint.setColor(getInDayMode() || GlobalConfig.isEinkModeEnabled() ? mSetting.fontColorDark : mSetting.fontColorLight);
+        widgetTextPaint.setColor(getInDayMode() || GlobalConfig.isEinkModeEnabled() ? mSetting.fontColorDark : mSetting.fontColorLight);
     }
 
     /**
@@ -208,13 +197,6 @@ public class WenkuReaderPageView extends View {
         int right = pxPageEdgeDistance + cutout.right;
         int bottom = pxPageEdgeDistance + pxWidgetHeight + cutout.bottom;
 
-        if (Build.VERSION.SDK_INT < 19) {
-            // Status bar didn't support transparent.
-            top -= statusBarHeight;
-            // Navigation bar didn't support transparent.
-            bottom += navBarHeight;
-        }
-
         Point topLeft = new Point(left, top);
         Point bottomRight = new Point(screenSize.x - right, screenSize.y - bottom);
         return new Pair<>(topLeft, bottomRight);
@@ -232,7 +214,6 @@ public class WenkuReaderPageView extends View {
     public WenkuReaderPageView(Context context, int lineIndex, int wordIndex, LOADING_DIRECTION directionForward) {
         super(context);
         Log.d("MewX", "-- view: construct my");
-        lineInfoList = new ArrayList<>();
         bitmapInfoList = new ArrayList<>();
         mLoader.setCurrentIndex(lineIndex);
 
@@ -246,307 +227,57 @@ public class WenkuReaderPageView extends View {
         textAreaSize = new Point(screenDrawArea.second.x - screenDrawArea.first.x,
                 screenDrawArea.second.y - screenDrawArea.first.y);
 
+        paginator = new WenkuReaderPaginator(mLoader,
+                text -> textPaint.measureText(text),
+                textAreaSize.x, textAreaSize.y, fontHeight,
+                pxLineDistance, pxParagraphDistance);
+
         // save vars, calc all ints
         switch (directionForward) {
             case FORWARDS:
-                if(wordIndex + 1 < mLoader.getCurrentStringLength()) {
-                    firstLineIndex = lineIndex;
-                    if(lineIndex == 0 && wordIndex == 0)
-                        firstWordIndex = 0;
-                    else
-                        firstWordIndex = wordIndex + 1;
-                }
-                else if(lineIndex + 1 < mLoader.getElementCount()){
-                    firstLineIndex = lineIndex + 1;
-                    firstWordIndex = 0;
-                }
-                else {
+                if (wordIndex + 1 < mLoader.getCurrentStringLength()) {
+                    paginator.setPageStart(
+                            lineIndex,
+                            /* wordIndex= */ lineIndex == 0 && wordIndex == 0 ? 0 : wordIndex + 1);
+                } else if (lineIndex + 1 < mLoader.getElementCount()) {
+                    paginator.setPageStart(lineIndex + 1, /* wordIndex= */ 0);
+                } else {
                     Log.d("MewX", "-- view: end construct A, just return");
                     return;
                 }
-                mLoader.setCurrentIndex(firstLineIndex);
-                calcFromFirst();
+                paginator.calcFromFirst();
                 break;
 
             case CURRENT:
-                firstLineIndex = lineIndex;
-                firstWordIndex = wordIndex;
-                mLoader.setCurrentIndex(firstLineIndex);
-                calcFromFirst();
+                paginator.setPageStart(lineIndex, wordIndex);
+                paginator.calcFromFirst();
                 break;
 
             case BACKWARDS:
                 // fit first and last
-                if(wordIndex > 0) {
-                    lastLineIndex = lineIndex;
-                    lastWordIndex = wordIndex - 1;
+                if (wordIndex > 0) {
+                    // firstLineIndex firstWordIndex; and last values changeable
+                    paginator.setPageEnd(lineIndex, wordIndex - 1);
+                } else if (lineIndex > 0) {
+                    paginator.setPageEnd(
+                            lineIndex - 1,
+                            /* wordIndex= */ mLoader.getStringLength(paginator.getLastLineIndex()) - 1);
                 }
-                else if(lineIndex > 0) {
-                    lastLineIndex = lineIndex - 1;
-                    lastWordIndex = mLoader.getStringLength(lastLineIndex) - 1;
-                }
-
-                // firstLineIndex firstWordIndex; and last values changeable
-                mLoader.setCurrentIndex(lastLineIndex);
-                calcFromLast();
+                paginator.calcFromLast();
                 break;
         }
 
-        for(LineInfo li : lineInfoList)
-            Log.d("MewX", "get: " + li.text);
-
-    }
-
-    /**
-     * Calc page from first to last.
-     * firstLineIndex & firstWordIndex set.
-     */
-    private void calcFromFirst() {
-        int widthSum = 0;
-        int heightSum = fontHeight;
-        StringBuilder tempText = new StringBuilder();
-
-        Log.d("MewX", "firstLineIndex = " + firstLineIndex + "; firstWordIndex = " + firstWordIndex);
-        for(int curLineIndex = firstLineIndex, curWordIndex = firstWordIndex; curLineIndex < mLoader.getElementCount(); ) {
-            // init paragraph head vars
-            if(curWordIndex == 0 && mLoader.getCurrentType() == WenkuReaderLoader.ElementType.TEXT) {
-                // leading space
-                widthSum = 2 * fontHeight;
-                tempText = new StringBuilder("　　");
-            }
-            else if(mLoader.getCurrentType() == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT) {
-                if(lineInfoList.size() != 0) {
-                    // end a page first
-                    lastLineIndex = mLoader.getCurrentIndex() - 1;
-                    mLoader.setCurrentIndex(lastLineIndex);
-                    lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                    break;
-                }
-
-                // one image on page
-                lastLineIndex = firstLineIndex = mLoader.getCurrentIndex();
-                firstWordIndex = 0;
-                lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                LineInfo li = new LineInfo();
-                li.type = WenkuReaderLoader.ElementType.IMAGE_DEPENDENT;
-                li.text = mLoader.getCurrentAsString();
-                lineInfoList.add(li);
-                break;
-            }
-
-            // get a record of line
-            if(mLoader.getCurrentAsString() == null || mLoader.getCurrentStringLength() == 0) {
-                Log.d("MewX", "empty string! in " + curLineIndex + "(" + curWordIndex + ")");
-                curWordIndex = 0;
-                if(curLineIndex >= mLoader.getElementCount()) {
-                    // out of bounds
-                    break;
-                }
-                mLoader.setCurrentIndex(++ curLineIndex);
-                continue;
-            }
-            String temp = mLoader.getCurrentAsString().charAt(curWordIndex) + "";
-            int tempWidth = (int) textPaint.measureText(temp);
-
-            // Line full?
-            if(widthSum + tempWidth > textAreaSize.x) {
-                // wrap line, save line
-                LineInfo li = new LineInfo();
-                li.type = WenkuReaderLoader.ElementType.TEXT;
-                li.text = tempText.toString();
-                lineInfoList.add(li);
-                heightSum += pxLineDistance;
-
-                // change vars for next line
-                if(heightSum + fontHeight > textAreaSize.y) {
-                    // reverse one index
-                    if(curWordIndex > 0) {
-                        lastLineIndex = curLineIndex;
-                        lastWordIndex = curWordIndex - 1;
-                    }
-                    else if(curLineIndex > 0) {
-                        mLoader.setCurrentIndex(-- curLineIndex);
-                        lastLineIndex = curLineIndex;
-                        lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                    }
-                    else {
-                        lastLineIndex = lastWordIndex = 0;
-                    }
-                    break; // height overflow
-                }
-
-                // height acceptable
-                tempText = new StringBuilder(temp);
-                widthSum = tempWidth;
-                heightSum += fontHeight;
-            }
-            else {
-                tempText.append(temp);
-                widthSum += tempWidth;
-            }
-
-            // String end?
-            if(curWordIndex + 1 >= mLoader.getCurrentStringLength()) {
-                // next paragraph, wrap line
-                LineInfo li = new LineInfo();
-                li.type = WenkuReaderLoader.ElementType.TEXT;
-                li.text = tempText.toString();
-                lineInfoList.add(li);
-                heightSum += pxParagraphDistance;
-
-                // height not acceptable
-                if(heightSum + fontHeight > textAreaSize.y) {
-                    lastLineIndex = mLoader.getCurrentIndex();
-                    lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                    break; // height overflow
-                }
-
-                // height acceptable
-                heightSum += fontHeight;
-                widthSum = 0;
-                tempText = new StringBuilder();
-                curWordIndex = 0;
-                if(curLineIndex + 1 >= mLoader.getElementCount()) {
-                    // out of bounds
-                    lastLineIndex = curLineIndex;
-                    lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                    break;
-                }
-                mLoader.setCurrentIndex(++ curLineIndex);
-            }
-            else {
-                curWordIndex ++;
-            }
-        }
-    }
-
-    /**
-     * Calc page from last to first
-     * lastLineIndex & lastWordIndex set.
-     */
-    private void calcFromLast() {
-
-        int heightSum = 0;
-        boolean isFirst = true;
-        mLoader.setCurrentIndex(lastLineIndex);
-
-        LineLoop:
-        for(int curLineIndex = lastLineIndex, curWordIndex = lastWordIndex; curLineIndex >= 0; ) {
-            // calc curLine to curWord(contained), make a String list
-            WenkuReaderLoader.ElementType curType = mLoader.getCurrentType();
-            String curString = mLoader.getCurrentAsString();
-
-            // special to image
-            if(curType == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT && lineInfoList.size() != 0) {
-                Log.d("MewX", "jump 1");
-                firstLineIndex = curLineIndex + 1;
-                firstWordIndex = 0;
-                mLoader.setCurrentIndex(firstLineIndex);
-                lineInfoList = new ArrayList<>();
-                calcFromFirst();
-                break;
-            }
-            else if(curType == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT) {
-                // one image on page
-                lastLineIndex = firstLineIndex = mLoader.getCurrentIndex();
-                firstWordIndex = 0;
-                lastWordIndex = mLoader.getCurrentStringLength() - 1;
-                LineInfo li = new LineInfo();
-                li.type = WenkuReaderLoader.ElementType.IMAGE_DEPENDENT;
-                li.text = mLoader.getCurrentAsString();
-                lineInfoList.add(li);
-                break;
-            }
-
-            int tempWidth = 0;
-            List<LineInfo> curList = new ArrayList<>();
-            String temp = "";
-            for(int i = 0; i < curString.length(); ) {
-                if(i == 0) {
-                    tempWidth += fontHeight + fontHeight;
-                    temp = "　　";
-                }
-
-                String c = curString.charAt(i) + "";
-                int width = (int) textPaint.measureText(c);
-                if(tempWidth + width > textAreaSize.x) {
-                    // save line to next
-                    LineInfo li = new LineInfo();
-                    li.type = WenkuReaderLoader.ElementType.TEXT;
-                    li.text = temp;
-                    curList.add(li);
-
-                    // fit needs
-                    if(i >= curWordIndex) break;
-
-                    // goto next round
-                    tempWidth = 0;
-                    temp = "";
-                    continue;
-                }
-                else {
-                    temp = temp + c;
-                    tempWidth += width;
-                    i ++;
-                }
-
-                // string end
-                if(i == curString.length()) {
-                    LineInfo li = new LineInfo();
-                    li.type = WenkuReaderLoader.ElementType.TEXT;
-                    li.text = temp;
-                    curList.add(li);
-                }
-            }
-
-            // reverse to add to lineInfoList, full to break, image to do calcFromFirst then break
-            for(int i = curList.size() - 1; i >= 0; i --) {
-                if(isFirst)
-                    isFirst = false;
-                else if(i == curList.size() - 1)
-                    heightSum += pxParagraphDistance;
-                else
-                    heightSum += pxLineDistance;
-
-                heightSum += fontHeight;
-                if(heightSum > textAreaSize.y) {
-                    // calc first index
-                    int indexCount = -2;
-                    for(int j = 0; j <= i; j ++) indexCount += curList.get(j).text.length();
-                    firstLineIndex = curLineIndex;
-                    firstWordIndex = indexCount + 1;
-
-                    // out of index
-                    if(firstWordIndex + 1 >= curString.length()) {
-                        firstLineIndex = curLineIndex + 1;
-                        firstWordIndex = 0;
-                    }
-                    break LineLoop;
-                }
-                lineInfoList.add(0, curList.get(i));
-            }
-            for(LineInfo li : lineInfoList)
-                Log.d("MewX", "full: " + li.text);
-
-            // not full to continue, set curWord as last index of the string
-            if(curLineIndex - 1 >= 0) {
-                mLoader.setCurrentIndex(-- curLineIndex);
-                curWordIndex = mLoader.getCurrentStringLength();
-            }
-            else {
-                Log.d("MewX", "jump 2");
-                firstLineIndex = 0;
-                firstWordIndex = 0;
-                mLoader.setCurrentIndex(firstLineIndex);
-                lineInfoList = new ArrayList<>();
-                calcFromFirst();
-                break;
-            }
+        for (LineInfo li : paginator.getLineInfoList()) {
+            Log.d("MewX", "get: " + li.text());
         }
     }
 
     private void drawBackground(Canvas canvas) {
-        if(getInDayMode()) {
+        if (GlobalConfig.isEinkModeEnabled()) {
+            Paint paintBackground = new Paint();
+            paintBackground.setColor(0xFFFFFFFF);
+            canvas.drawRect(0, 0, screenSize.x, screenSize.y, paintBackground);
+        } else if(getInDayMode()) {
             // day
             if(bmdBackground != null)
                 bmdBackground.draw(canvas);
@@ -564,17 +295,17 @@ public class WenkuReaderPageView extends View {
 
     private void drawWidgets(Canvas canvas) {
         canvas.drawText(mLoader.getChapterName(), screenDrawArea.first.x, screenDrawArea.second.y + widgetFontHeihgt, widgetTextPaint);
-        String percentage = "( " + (lastLineIndex + 1) * 100 / mLoader.getElementCount() + "% )";
+        String percentage = "( " + (paginator.getLastLineIndex() + 1) * 100 / mLoader.getElementCount() + "% )";
         final int textWidth = (int) widgetTextPaint.measureText(percentage);
         canvas.drawText(percentage, screenDrawArea.second.x - textWidth, screenDrawArea.second.y + widgetFontHeihgt, widgetTextPaint);
     }
 
     private void drawContent(Canvas canvas) {
         int heightSum = screenDrawArea.first.y + fontHeight; // The baseline (i.e. y).
-        for(int i = 0; i < lineInfoList.size(); i ++) {
-            final LineInfo li = lineInfoList.get(i);
+        for(int i = 0; i < paginator.getLineInfoList().size(); i++) {
+            final LineInfo li = paginator.getLineInfoList().get(i);
             if( i != 0 ) {
-                if(li.text.length() > 2 && li.text.substring(0, 2).equals("　　")) {
+                if(li.text().length() > 2 && li.text().substring(0, 2).equals("　　")) {
                     heightSum += pxParagraphDistance;
                 }
                 else {
@@ -582,14 +313,14 @@ public class WenkuReaderPageView extends View {
                 }
             }
 
-            Log.d(WenkuReaderPageView.class.getSimpleName(), "draw: " + li.text);
-            if(li.type == WenkuReaderLoader.ElementType.TEXT) {
-                canvas.drawText( li.text, (float) screenDrawArea.first.x, (float) heightSum, textPaint);
+            Log.d(WenkuReaderPageView.class.getSimpleName(), "draw: " + li.text());
+            if(li.type() == WenkuReaderLoader.ElementType.TEXT) {
+                canvas.drawText( li.text(), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
                 heightSum += fontHeight;
-            } else if(li.type == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT){
+            } else if(li.type() == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT){
                 if (bitmapInfoList == null) {
                     // TODO: fix this magic number 21.
-                    canvas.drawText("Unexpected array: " + li.text.substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
+                    canvas.drawText("Unexpected array: " + li.text().substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
                     continue;
                 }
 
@@ -604,7 +335,7 @@ public class WenkuReaderPageView extends View {
                 if (bi == null) {
                     // not found, new load task
                     // TODO: fix this magic number 21.
-                    canvas.drawText("正在加载图片：" + li.text.substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
+                    canvas.drawText("正在加载图片：" + li.text().substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
                     bi = new BitmapInfo();
                     bi.idxLineInfo = i;
                     bi.x_beg = screenDrawArea.first.x;
@@ -618,7 +349,7 @@ public class WenkuReaderPageView extends View {
                 } else {
                     if (bi.bm == null) {
                         // TODO: fix this magic number 21.
-                        canvas.drawText("正在加载图片：" + li.text.substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
+                        canvas.drawText("正在加载图片：" + li.text().substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
                     } else {
                         int new_x = (screenDrawArea.second.x - screenDrawArea.first.x - bi.width) / 2 + bi.x_beg;
                         int new_y = (screenDrawArea.second.y - screenDrawArea.first.y - bi.height) / 2 + bi.y_beg;
@@ -627,7 +358,7 @@ public class WenkuReaderPageView extends View {
                 }
             } else {
                 // TODO: fix this magic number 21.
-                canvas.drawText("（！请先用旧引擎浏览）图片" + li.text.substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
+                canvas.drawText("（！请先用旧引擎浏览）图片" + li.text().substring(21), (float) screenDrawArea.first.x, (float) heightSum, textPaint);
             }
         }
     }
@@ -645,19 +376,22 @@ public class WenkuReaderPageView extends View {
     }
 
     public int getFirstLineIndex() {
-        return firstLineIndex;
+        return paginator.getFirstLineIndex();
     }
 
     public int getFirstWordIndex() {
-        return firstWordIndex;
+        return paginator.getFirstWordIndex();
     }
 
     public int getLastLineIndex() {
-        return lastLineIndex;
+        return paginator.getLastLineIndex();
     }
 
+    /**
+     * @return last paragraph's last word's index
+     */
     public int getLastWordIndex() {
-        return lastWordIndex;
+        return paginator.getLastWordIndex();
     }
 
     private class AsyncLoadImage extends AsyncTask<BitmapInfo, Integer, Wenku8Error.ErrorCode> {
@@ -667,23 +401,23 @@ public class WenkuReaderPageView extends View {
             // Make an alias for the bitmap info.
             BitmapInfo bitmapInfo = params[0];
 
-            String imgFileName = GlobalConfig.generateImageFileNameByURL(lineInfoList.get(bitmapInfo.idxLineInfo).text);
-            if(GlobalConfig.getAvailableNovelContentImagePath(imgFileName) == null) {
-                if (!GlobalConfig.saveNovelContentImage(lineInfoList.get(bitmapInfo.idxLineInfo).text)) {
+            String imgFileName = GlobalConfig.generateImageFileNameByURL(paginator.getLineInfoList().get(bitmapInfo.idxLineInfo).text());
+            if(GlobalConfig.getExistingNovelContentImagePath(imgFileName) == null) {
+                if (!GlobalConfig.saveNovelContentImage(paginator.getLineInfoList().get(bitmapInfo.idxLineInfo).text())) {
                     return Wenku8Error.ErrorCode.NETWORK_ERROR;
                 }
 
                 // Double check if the image exists in local storage.
-                if (GlobalConfig.getAvailableNovelContentImagePath(imgFileName) == null) {
+                if (GlobalConfig.getExistingNovelContentImagePath(imgFileName) == null) {
                     return Wenku8Error.ErrorCode.STORAGE_ERROR;
                 }
 
                 // The image should be downloaded.
-                imgFileName = GlobalConfig.generateImageFileNameByURL(lineInfoList.get(bitmapInfo.idxLineInfo).text);
+                imgFileName = GlobalConfig.generateImageFileNameByURL(paginator.getLineInfoList().get(bitmapInfo.idxLineInfo).text());
             }
 
             ImageSize targetSize = new ImageSize(bitmapInfo.width, bitmapInfo.height); // result Bitmap will be fit to this size
-            bitmapInfo.bm = ImageLoader.getInstance().loadImageSync("file://" + GlobalConfig.getAvailableNovelContentImagePath(imgFileName), targetSize);
+            bitmapInfo.bm = ImageLoader.getInstance().loadImageSync("file://" + GlobalConfig.getExistingNovelContentImagePath(imgFileName), targetSize);
             if (bitmapInfo.bm == null) {
                 return Wenku8Error.ErrorCode.IMAGE_LOADING_ERROR;
             }
@@ -717,14 +451,27 @@ public class WenkuReaderPageView extends View {
     }
 
     public void watchImageDetailed(Activity activity) {
-        if(bitmapInfoList == null || bitmapInfoList.size() == 0 || bitmapInfoList.get(0).bm == null) {
+        if(bitmapInfoList == null || bitmapInfoList.isEmpty() || bitmapInfoList.get(0).bm == null) {
+            // This should now be impossible to reach because we've already conditionally show the action_watch_image menu.
             Toast.makeText(getContext(), getResources().getString(R.string.reader_view_image_no_image), Toast.LENGTH_SHORT).show();
         }
         else {
             Intent intent = new Intent(activity, ViewImageDetailActivity.class);
-            intent.putExtra("path", GlobalConfig.getAvailableNovelContentImagePath(GlobalConfig.generateImageFileNameByURL(lineInfoList.get(bitmapInfoList.get(0).idxLineInfo).text)));
+            intent.putExtra("path", GlobalConfig.getExistingNovelContentImagePath(GlobalConfig.generateImageFileNameByURL(paginator.getLineInfoList().get(bitmapInfoList.get(0).idxLineInfo).text())));
             activity.startActivity(intent);
             activity.overridePendingTransition(R.anim.fade_in, R.anim.hold); // fade in animation
         }
+    }
+
+    public boolean hasImageInPage() {
+        if (paginator == null || paginator.getLineInfoList() == null) {
+            return false;
+        }
+        for (LineInfo li : paginator.getLineInfoList()) {
+            if (li.type() == WenkuReaderLoader.ElementType.IMAGE_DEPENDENT || li.type() == WenkuReaderLoader.ElementType.IMAGE_INDEPENDENT) {
+                return true;
+            }
+        }
+        return false;
     }
 }

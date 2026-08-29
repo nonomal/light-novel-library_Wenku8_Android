@@ -24,8 +24,7 @@ import androidx.recyclerview.widget.DefaultItemAnimator;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.snackbar.Snackbar;
 
 import org.mewx.wenku8.R;
@@ -33,11 +32,13 @@ import org.mewx.wenku8.activity.NovelInfoActivity;
 import org.mewx.wenku8.adapter.NovelItemAdapterUpdate;
 import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.global.api.NovelItemInfoUpdate;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.global.api.Wenku8Parser;
+import org.mewx.wenku8.global.api.NovelListWithInfoParser;
+import org.mewx.wenku8.api.Wenku8API;
 import org.mewx.wenku8.listener.MyItemClickListener;
 import org.mewx.wenku8.listener.MyItemLongClickListener;
-import org.mewx.wenku8.util.LightNetwork;
+import org.mewx.wenku8.network.LightNetwork;
+import org.mewx.wenku8.util.AsyncTaskTracker;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
@@ -46,7 +47,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import fr.castorflex.android.smoothprogressbar.SmoothProgressBar;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
 
 public class NovelItemListFragment extends Fragment implements MyItemClickListener, MyItemLongClickListener {
 
@@ -60,7 +61,7 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
     private ActionBar actionBar = null;
     private LinearLayoutManager mLayoutManager = null;
     private RecyclerView mRecyclerView = null;
-    private SmoothProgressBar spb = null;
+    private LinearProgressIndicator spb = null;
 
     // novel list info
     private List<Integer> listNovelItemAid = new ArrayList<>(); // aid list
@@ -71,20 +72,37 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
     private int currentPage = 1; // default 1
     private int totalPage = 0; // default 0
 
+    public NovelItemListFragment() {
+        // Required empty public constructor
+    }
+
     public static NovelItemListFragment newInstance(Bundle args) {
         NovelItemListFragment fragment = new NovelItemListFragment();
         fragment.setArguments(args);
         return fragment;
     }
 
+    private final AsyncTaskTracker tracker = new AsyncTaskTracker();
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        listType = getArguments().getString("type");
+        final Bundle args = getArguments();
+        listType = args == null ? "" : args.getString("type", "");
         // judge if is 'search'
-        searchKey = listType.equals(SEARCH_TYPE) ? getArguments().getString("key") : "";
+        searchKey = args != null && SEARCH_TYPE.equals(listType) ? args.getString("key", "") : "";
 
         actionBar = ((AppCompatActivity) getActivity()).getSupportActionBar();
+    }
+
+    @Override
+    public void onDestroy() {
+        // onDestroy, deliberately not onDestroyView. The Fragment outlives its view in a
+        // ViewPager, and its isLoading flag with it; cancelling on view destruction would skip
+        // the onPostExecute that clears that flag and leave the list stuck on "Loading..." --
+        // the bug 723e93d patched. By onDestroy the flag is going away too.
+        tracker.cancelAll();
+        super.onDestroy();
     }
 
     @Override
@@ -93,22 +111,14 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
         rootView.setTag(listType); // set TAG
 
         // Set warning message.
-        rootView.findViewById(R.id.relay_warning).setOnClickListener(view -> new MaterialDialog.Builder(getContext())
-                .theme(Theme.LIGHT)
-                .backgroundColorRes(R.color.dlgBackgroundColor)
-                .contentColorRes(R.color.dlgContentColor)
-                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                .title(getResources().getString(R.string.system_warning))
-                .content(getResources().getString(R.string.relay_warning_full))
-                .positiveText(R.string.dialog_positive_ok)
+        rootView.findViewById(R.id.relay_warning).setOnClickListener(view -> new MaterialAlertDialogBuilder(getContext())
+                .setTitle(getResources().getString(R.string.system_warning))
+                .setMessage(getResources().getString(R.string.relay_warning_full))
+                .setPositiveButton(R.string.dialog_positive_ok, null)
                 .show());
 
         // init values
-        listNovelItemAid = new ArrayList<>();
-        listNovelItemInfo = new ArrayList<>();
-        currentPage = 1; // default 1
-        totalPage = 0; // default 0
+        if (totalPage == 0) currentPage = 1; // default 1
 
         mLayoutManager = new LinearLayoutManager(getActivity());
         mLayoutManager.setOrientation(LinearLayoutManager.VERTICAL);
@@ -117,23 +127,41 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
         mRecyclerView.setItemAnimator(new DefaultItemAnimator());
         mRecyclerView.setLayoutManager(mLayoutManager);
 
-        // List request
-        if(listType.equals(SEARCH_TYPE)) {
-            // update UI
-            spb = getActivity().findViewById(R.id.spb);
-            spb.progressiveStart();
-
-            // execute task
-            Toast.makeText(getActivity(),"search",Toast.LENGTH_SHORT).show();
-            AsyncGetSearchResultList asyncGetSearchResultList = new AsyncGetSearchResultList();
-            asyncGetSearchResultList.execute(searchKey);
-        }
-        else {
-            // Listener
+        // The scroll listeners belong to the view, not to the data, so they have to be attached
+        // every time a view is created. Attaching them only on the load-from-empty path below left
+        // a tab that the ViewPager had destroyed and rebuilt -- the Fragment and its data outlive
+        // its view -- with neither pagination nor toolbar hiding for the rest of the session.
+        //
+        // Search is excluded on purpose: it has no pages, and MyOnScrollListener would end up
+        // calling getNovelSortedBy(SEARCH_TYPE), which throws IllegalStateException.
+        if (!listType.equals(SEARCH_TYPE)) {
             mRecyclerView.addOnScrollListener(new MyOnScrollListener());
             mRecyclerView.addOnScrollListener(new OnHidingScrollListener());
-            AsyncGetNovelItemList asyncGetNovelItemList = new AsyncGetNovelItemList();
-            asyncGetNovelItemList.execute(currentPage);
+        }
+
+        // Reuse existing data if available
+        if (!listNovelItemInfo.isEmpty()) {
+            mAdapter = new NovelItemAdapterUpdate(listNovelItemInfo);
+            mAdapter.setOnItemClickListener(this);
+            mAdapter.setOnItemLongClickListener(this);
+            mRecyclerView.setAdapter(mAdapter);
+        }
+        else {
+            // List request
+            if(listType.equals(SEARCH_TYPE)) {
+                // update UI
+                spb = getActivity().findViewById(R.id.spb);
+                spb.setVisibility(View.VISIBLE);
+    
+                // execute task
+                Toast.makeText(getActivity(),"search",Toast.LENGTH_SHORT).show();
+                AsyncGetSearchResultList asyncGetSearchResultList = tracker.track(new AsyncGetSearchResultList());
+                asyncGetSearchResultList.execute(searchKey);
+            }
+            else {
+                AsyncGetNovelItemList asyncGetNovelItemList = tracker.track(new AsyncGetNovelItemList());
+                asyncGetNovelItemList.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, currentPage);
+            }
         }
         return rootView;
     }
@@ -159,15 +187,10 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
         intent.putExtra("from", "list");
         intent.putExtra("title", ((TextView) view.findViewById(R.id.novel_title)).getText());
 
-        if(Build.VERSION.SDK_INT < 21) {
-            startActivity(intent);
-        }
-        else {
-            ActivityOptionsCompat options = ActivityOptionsCompat.makeSceneTransitionAnimation(getActivity(),
-                    Pair.create(view.findViewById(R.id.novel_cover), "novel_cover"),
-                    Pair.create(view.findViewById(R.id.novel_title), "novel_title"));
-            ActivityCompat.startActivity(getActivity(), intent, options.toBundle());
-        }
+        ActivityOptionsCompat options = ActivityOptionsCompat.makeSceneTransitionAnimation(getActivity(),
+                Pair.create(view.findViewById(R.id.novel_cover), "novel_cover"),
+                Pair.create(view.findViewById(R.id.novel_title), "novel_title"));
+        ActivityCompat.startActivity(getActivity(), intent, options.toBundle());
     }
 
     @Override
@@ -176,36 +199,53 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
     }
 
     private class OnHidingScrollListener extends RecyclerView.OnScrollListener {
-        int toolbarMarginOffset = 0;
+        private int accumulatedDy = 0;
 
         @Override
         public void onScrolled(@NonNull RecyclerView recyclerView, int dx, int dy) {
             super.onScrolled(recyclerView, dx, dy);
+            if (actionBar == null) {
+                return;
+            }
 
-            toolbarMarginOffset += dy;
-            if (toolbarMarginOffset > actionBar.getHeight())
+            // Accumulate within one direction only, resetting when the direction changes.
+            //
+            // This used to be a single running total that called show() when it came back to
+            // exactly zero, so the bar stayed hidden until the list was scrolled the whole way
+            // back to the top -- and stayed hidden for good whenever the total never landed on
+            // zero, which appending a page makes easy.
+            if ((dy > 0) != (accumulatedDy > 0)) {
+                accumulatedDy = 0;
+            }
+            accumulatedDy += dy;
+
+            final int threshold = actionBar.getHeight();
+            if (accumulatedDy > threshold) {
                 actionBar.hide();
-            if (toolbarMarginOffset == 0)
+            } else if (accumulatedDy < -threshold) {
                 actionBar.show();
+            }
         }
     }
 
 
-    private void refreshPartialIdList(List<Integer> newNovelItemAids) {
+    /**
+     * Appends a page that already carries its novel details, so no row has to fetch its own.
+     * The search path still arrives as bare ids and goes through {@link #refreshEntireIdList()}.
+     */
+    private void refreshPartialInfoList(List<NovelItemInfoUpdate> newNovelItems) {
         // Some sanity checks.
-        if (newNovelItemAids == null || newNovelItemAids.isEmpty()) {
+        if (newNovelItems == null || newNovelItems.isEmpty()) {
             return;
         }
-
-        // add to total list
-        listNovelItemAid.addAll(newNovelItemAids);
 
         // Just append new updates.
         int startIndex = listNovelItemInfo.size();
 
-        // set empty
-        for(Integer aid : newNovelItemAids) {
-            listNovelItemInfo.add(new NovelItemInfoUpdate(aid));
+        // The aid list backs onItemClick, so it has to grow alongside the info list.
+        for(NovelItemInfoUpdate info : newNovelItems) {
+            listNovelItemAid.add(info.aid);
+            listNovelItemInfo.add(info);
         }
 
         if(mAdapter == null) {
@@ -219,7 +259,7 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
             mRecyclerView.setAdapter(mAdapter);
         }
         else {
-            mAdapter.notifyItemRangeInserted(startIndex, newNovelItemAids.size());
+            mAdapter.notifyItemRangeInserted(startIndex, newNovelItems.size());
         }
     }
 
@@ -254,33 +294,87 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
         @Override
         public void onScrolled(@NonNull RecyclerView recyclerView, int dx, int dy) {
             super.onScrolled(recyclerView, dx, dy);
+            maybeLoadNextPage();
+        }
 
-            int pastVisiblesItems, visibleItemCount, totalItemCount;
-            visibleItemCount = mLayoutManager.getChildCount();
-            totalItemCount = mLayoutManager.getItemCount();
-            pastVisiblesItems = mLayoutManager.findFirstVisibleItemPosition();
+        @Override
+        public void onScrollStateChanged(@NonNull RecyclerView recyclerView, int newState) {
+            super.onScrollStateChanged(recyclerView, newState);
 
-            if (!isLoading.get()) {
-                // 滚动到一半的时候加载，即：剩余2个元素的时候就加载
-                if (visibleItemCount + pastVisiblesItems + 2 >= totalItemCount && (totalPage==0 || currentPage < totalPage)) {
-                    // load more toast
-                    Snackbar.make(mRecyclerView, getResources().getString(R.string.list_loading)
-                                    + "(" + (currentPage + 1) + "/" + totalPage + ")",
-                            Snackbar.LENGTH_SHORT).show();
-
-                    // load more thread
-                    new AsyncGetNovelItemList().execute(currentPage + 1);
-                }
+            // Resting against the end of the list, onScrolled stops firing entirely -- there is
+            // no movement left to report -- so a list that reached the bottom without starting
+            // the next page had no way to recover except scrolling up and back down again.
+            // Dragging still changes the scroll state even when nothing moves, so this turns
+            // that same gesture into a retry.
+            if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+                maybeLoadNextPage();
             }
         }
     }
 
+    /**
+     * Starts the next page when the list is near its end and nothing is already in flight.
+     *
+     * <p>Called from the scroll listener, and again once a page has been appended. That second
+     * caller is what stops the list getting stuck. Loading was previously only ever started by a
+     * scroll event, so a page that arrived after the fling had stopped left the list sitting at
+     * the bottom with nothing to continue it until the user scrolled again -- which is easy to hit
+     * here, because all twelve ranking tabs queue on AsyncTask's serial executor and a fetch can
+     * land seconds after it was asked for.
+     *
+     * <p>The re-check cannot run away: appending a page grows the item count by ten while the
+     * first visible position stays put, so the condition below goes false again after one more
+     * load. The exception is a list too short to fill the screen, where it keeps going until the
+     * screen is full, which is the wanted behaviour.
+     */
+    private void maybeLoadNextPage() {
+        if (!isAdded() || mRecyclerView == null || mLayoutManager == null || isLoading.get()) {
+            return;
+        }
+
+        final int visibleItemCount = mLayoutManager.getChildCount();
+        final int totalItemCount = mLayoutManager.getItemCount();
+        final int pastVisiblesItems = mLayoutManager.findFirstVisibleItemPosition();
+
+        // 滚动到一半的时候加载，即：剩余2个元素的时候就加载
+        if (visibleItemCount + pastVisiblesItems + 2 >= totalItemCount
+                && (totalPage == 0 || currentPage < totalPage)) {
+            // load more toast
+            Snackbar.make(mRecyclerView, getResources().getString(R.string.list_loading)
+                            + "(" + (currentPage + 1) + "/" + totalPage + ")",
+                    Snackbar.LENGTH_SHORT).show();
+
+            // load more thread
+            tracker.track(new AsyncGetNovelItemList())
+                    .executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, currentPage + 1);
+        }
+    }
+
+    /**
+     * Fetches one page of the list.
+     *
+     * <p>Started on {@link AsyncTask#THREAD_POOL_EXECUTOR} rather than through {@code execute()},
+     * which would use the serial one. All twelve ranking tabs share that single queue, so a tab's
+     * fetch could sit behind several other tabs' initial loads, each with its own connect and read
+     * timeout, and land seconds after the list had reached the point of needing it. The number of
+     * requests is unchanged -- only whether tabs wait for each other.
+     *
+     * <p>Concurrency is contained: every field this touches belongs to one Fragment, and the CAS
+     * on {@code isLoading} still admits a single fetch per list. It relies on a losing task not
+     * clearing that flag, which the serial queue used to hide.
+     */
     private class AsyncGetNovelItemList extends AsyncTask<Integer, Integer, Integer> {
         private boolean usingWenku8Relay = false;
 
-        private List<Integer> tempNovelList = new ArrayList<>();
+        private List<NovelItemInfoUpdate> tempNovelItems = new ArrayList<>();
 
         private boolean raceCondition;
+
+        /** The page this task asked for. Promoted to currentPage only once it actually arrives. */
+        private int requestedPage;
+
+        /** result.pageNum, published from onPostExecute rather than from the background thread. */
+        private int parsedTotalPage;
 
         AsyncGetNovelItemList() {
             raceCondition = !isLoading.compareAndSet(false, true);
@@ -294,75 +388,82 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
                 return -1;
             }
 
-            // Update the current page to the new page.
-            currentPage = params[0];
+            requestedPage = params[0];
 
-            // params[0] is current page number
-            ContentValues cv = Wenku8API.getNovelList(Wenku8API.getNOVELSORTBY(listType), currentPage);
+            ContentValues cv = Wenku8API.getNovelListWithInfo(Wenku8API.getNovelSortedBy(listType),
+                    requestedPage, GlobalConfig.getCurrentLang());
             byte[] temp = LightNetwork.LightHttpPostConnection( Wenku8API.BASE_URL, cv);
-            if(temp == null) {
-                // Try requesting from the relay.
-                temp = LightNetwork.LightHttpPostConnection(Wenku8API.RELAY_URL, cv, false);
-                if (temp == null) {
-                    // Still failed, return the error code.
-                    return -1;
-                }
-                usingWenku8Relay = true;
+            if (temp == null) {
+                return -1;
             }
             try {
-                Log.d("MewX", "doInBackground: loading page " + currentPage);
-                tempNovelList = Wenku8Parser.parseNovelItemList(new String(temp, "UTF-8"));
+                Log.d("MewX", "doInBackground: loading page " + requestedPage);
+                NovelListWithInfoParser.Result result =
+                        NovelListWithInfoParser.parse(new String(temp, "UTF-8"));
+                if (result == null) {
+                    return -1;
+                }
+                parsedTotalPage = result.pageNum;
+                tempNovelItems = result.items;
             }
             catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("NovelItemListFragment.AsyncGetNovelItemList", e);
             }
 
             // judge result
-            if (tempNovelList.isEmpty()) {
-                Log.d("MewX", "in AsyncGetNovelItemList: doInBackground: tempNovelList == null || tempNovelList.size() == 0");
-                // Try requesting from the relay.
-                temp = LightNetwork.LightHttpPostConnection(Wenku8API.RELAY_URL, cv, false);
-                if (temp == null) {
-                    // Still failed, returns no error code.
-                    return 0;
-                }
-                try {
-                    tempNovelList = Wenku8Parser.parseNovelItemList(new String(temp, "UTF-8"));
-                }
-                catch (UnsupportedEncodingException e) {
-                    e.printStackTrace();
-                }
-                if (tempNovelList.isEmpty()) {
-                    // Still failed.
-                    return 0;
-                }
-                usingWenku8Relay = true;
+            if (tempNovelItems.isEmpty()) {
+                Log.d("MewX", "in AsyncGetNovelItemList: doInBackground: tempNovelItems is empty");
             }
-
-            totalPage = tempNovelList.get(0);
-            tempNovelList.remove(0);
             return 0;
         }
 
         @Override
         protected void onPostExecute(Integer integer) {
+            // Only the task that won the CAS owns the flag. One that lost did no work, and must
+            // not release a flag the winner is still holding.
+            if (!raceCondition) {
+                isLoading.set(false);
+            }
+
+            // Updating the results only when the fragment is attached correctly.
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+
             if (integer == -1) {
-                // network error
-                return;
-            }
-            if (tempNovelList.isEmpty()) {
-                Log.d("MewX", "in AsyncGetNovelItemList: onPostExecute: tempNovelList == null || tempNovelList.size() == 0");
+                // Network error. Deliberately no automatic retry here: the trigger condition is
+                // still true, so re-checking would spin straight into another request and keep
+                // doing it. Recovery is the scroll-state gesture in MyOnScrollListener instead.
                 return;
             }
 
-            refreshPartialIdList(tempNovelList);
-            isLoading.set(false);
+            // Publish the page count even for an empty page, so the "no more pages" guard sees it.
+            if (parsedTotalPage > 0) {
+                totalPage = parsedTotalPage;
+            }
 
-            if (getActivity() != null) {
-                View relayWarningView = getActivity().findViewById(R.id.relay_warning);
-                if (relayWarningView != null) {
-                    relayWarningView.setVisibility(usingWenku8Relay ? View.VISIBLE : View.GONE);
-                }
+            if (tempNovelItems.isEmpty()) {
+                Log.d("MewX", "in AsyncGetNovelItemList: onPostExecute: tempNovelItems is empty");
+                return;
+            }
+
+            // Advance only now that the page has actually arrived. Doing this at the top of
+            // doInBackground meant a failed request moved the counter on anyway, so the page it
+            // had failed to fetch was skipped and never asked for again.
+            currentPage = requestedPage;
+
+            refreshPartialInfoList(tempNovelItems);
+
+            // TODO: remove this warning view because all traffic will come from the relay.
+            View relayWarningView = getActivity().findViewById(R.id.relay_warning);
+            if (relayWarningView != null) {
+                relayWarningView.setVisibility(usingWenku8Relay ? View.VISIBLE : View.GONE);
+            }
+
+            // Re-check once the inserted rows have been laid out: if the list still ends within
+            // the trigger distance, nothing else would start the page after this one.
+            if (mRecyclerView != null) {
+                mRecyclerView.post(NovelItemListFragment.this::maybeLoadNextPage);
             }
         }
     }
@@ -386,7 +487,7 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
                 while (m.find())
                     listResultList.add(Integer.valueOf(m.group(1)));
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("NovelItemListFragment.AsyncGetSearchResultList", e);
             }
 
             // get search result by author name
@@ -405,7 +506,7 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
                     Log.d("MewX", listResultList2.get(listResultList2.size()-1).toString());
                 }
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("NovelItemListFragment.AsyncGetSearchResultList", e);
             }
 
             // set migrate
@@ -420,7 +521,12 @@ public class NovelItemListFragment extends Fragment implements MyItemClickListen
         protected void onPostExecute(Integer integer) {
             super.onPostExecute(integer);
 
-            spb.progressiveStop();
+            // Updating the results only when the fragment is attached correctly.
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+
+            spb.setVisibility(View.INVISIBLE);
             if(integer == -1) {
                 Toast.makeText(getActivity(), getResources().getString(R.string.system_network_error),Toast.LENGTH_LONG).show();
                 return;

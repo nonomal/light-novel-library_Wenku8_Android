@@ -1,33 +1,45 @@
 package org.mewx.wenku8.activity;
 
 import android.content.ContentValues;
+import android.content.res.ColorStateList;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
 import android.os.AsyncTask;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.afollestad.materialdialogs.GravityEnum;
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
-import com.getbase.floatingactionbutton.FloatingActionButton;
-import com.getbase.floatingactionbutton.FloatingActionsMenu;
+import com.google.android.material.button.MaterialButton;
+
+import androidx.activity.OnBackPressedCallback;
+import androidx.core.view.GravityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
+
+import android.view.animation.OvershootInterpolator;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import org.mewx.wenku8.util.ProgressDialogHelper;
+import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton;
+import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.AdView;
 import com.google.firebase.analytics.FirebaseAnalytics;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 import com.nostra13.universalimageloader.core.ImageLoader;
 
 import org.mewx.wenku8.R;
@@ -37,20 +49,28 @@ import org.mewx.wenku8.global.api.NovelItemMeta;
 import org.mewx.wenku8.global.api.OldNovelContentParser;
 import org.mewx.wenku8.global.api.OldNovelContentParser.NovelContentType;
 import org.mewx.wenku8.global.api.VolumeList;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.global.api.Wenku8Error;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8Error;
 import org.mewx.wenku8.global.api.Wenku8Parser;
 import org.mewx.wenku8.reader.activity.Wenku8ReaderActivityV1;
 import org.mewx.wenku8.util.LightCache;
-import org.mewx.wenku8.util.LightNetwork;
+import org.mewx.wenku8.network.LightNetwork;
 import org.mewx.wenku8.util.LightTool;
+import org.mewx.wenku8.util.AsyncTaskTracker;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
-import fr.castorflex.android.smoothprogressbar.SmoothProgressBar;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Created by MewX on 2015/5/13.
@@ -66,41 +86,82 @@ public class NovelInfoActivity extends BaseMaterialActivity {
     private int aid = 1;
     private String from = "", title = "";
     private boolean isLoading = true;
+
+    // Only the read-only info fetches are tracked. The tasks that change something --
+    // downloading volumes, adding to or removing from the cloud bookshelf -- are left to run:
+    // their onPostExecute is already lifecycle-guarded, and cancelling them would abandon work
+    // the user explicitly asked for.
+    private final AsyncTaskTracker tracker = new AsyncTaskTracker();
     private RelativeLayout rlMask = null; // mask layout
     private LinearLayout mLinearLayout = null;
+    private DrawerLayout mDrawerLayout;
+    private LinearLayout mChapterListLayout;
+    private TextView mSideSheetHeader;
+    private VolumeList mCurrentSelectedVolume = null;
     private TextView tvNovelTitle = null;
     private TextView tvNovelAuthor = null;
     private TextView tvNovelStatus = null;
     private TextView tvNovelUpdate = null;
     private TextView tvLatestChapter = null;
     private TextView tvNovelFullIntro = null;
-    private MaterialDialog pDialog = null;
-    private FloatingActionButton fabFavorite = null;
-    private FloatingActionsMenu famMenu = null;
-    private SmoothProgressBar spb = null;
+    private ProgressDialogHelper pDialog = null;
+    private ExtendedFloatingActionButton fabFavorite = null;
+    private ExtendedFloatingActionButton fabDownload = null;
+    private FloatingActionButton fabMenu = null;
+    private AtomicBoolean isMenuExpanded = new AtomicBoolean(false);
+    private LinearProgressIndicator spb = null;
     private NovelItemMeta mNovelItemMeta = null;
     private List<VolumeList> listVolume = new ArrayList<>();
     private String novelFullMeta = null, novelFullIntro = null, novelFullVolume = null;
+    private LinearLayout llError;
+    private TextView tvErrorMsg;
+    private MaterialButton btnRetry;
+    private ScrollView novelInfoScrollView;
+    private LinearLayout fabContainer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         initMaterialStyle(R.layout.layout_novel_info);
 
+        // Fixing the broken bottom navigation bar color due to replacing RelativeLayout with
+        // DrawerLayout which no longer supports overriding a background color.
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        getWindow().setNavigationBarColor(getResources().getColor(R.color.myNavigationColor));
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (mDrawerLayout.isDrawerOpen(GravityCompat.END)) {
+                    mDrawerLayout.closeDrawer(GravityCompat.END);
+                } else if (isMenuExpanded.get()) {
+                    collapseMenu();
+                } else {
+                    // Normal exit
+                    finishAfterTransition();
+                }
+            }
+        });
+
         // Init Firebase Analytics on GA4.
-        mFirebaseAnalytics = FirebaseAnalytics.getInstance(this);
+        mFirebaseAnalytics = GoogleServicesHelper.initFirebase(this);
 
         // fetch values
         aid = getIntent().getIntExtra("aid", 1);
         from = getIntent().getStringExtra("from");
         title = getIntent().getStringExtra("title");
 
+        // Crash report context. This screen owns four AsyncTasks that all touch views in
+        // onPostExecute, so knowing which novel was open narrows down a report a lot.
+        CrashReporter.setKey(CrashReporter.Keys.NOVEL_AID, aid);
+
         // Analysis.
         Bundle viewItemParams = new Bundle();
         viewItemParams.putString(FirebaseAnalytics.Param.ITEM_ID, "" + aid);
         viewItemParams.putString(FirebaseAnalytics.Param.ITEM_NAME, title);
         viewItemParams.putString("from", from);
-        mFirebaseAnalytics.logEvent(FirebaseAnalytics.Event.VIEW_ITEM, viewItemParams);
+        GoogleServicesHelper.logEvent(mFirebaseAnalytics, FirebaseAnalytics.Event.VIEW_ITEM, viewItemParams);
 
         // UIL setting
         if(ImageLoader.getInstance() == null || !ImageLoader.getInstance().isInited()) {
@@ -108,6 +169,10 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         }
 
         // get views
+        mDrawerLayout = findViewById(R.id.drawer_layout);
+        mDrawerLayout.setDrawerLockMode(DrawerLayout.LOCK_MODE_LOCKED_CLOSED);
+        mChapterListLayout = findViewById(R.id.novel_chapter_scroll);
+        mSideSheetHeader = findViewById(R.id.side_sheet_header);
         rlMask = findViewById(R.id.white_mask);
         mLinearLayout = findViewById(R.id.novel_info_scroll);
         LinearLayout llCardLayout = findViewById(R.id.item_card);
@@ -121,9 +186,21 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         tvNovelFullIntro = findViewById(R.id.novel_intro_full);
         ImageButton ibNovelOption = findViewById(R.id.novel_option);
         fabFavorite = findViewById(R.id.fab_favorate);
-        FloatingActionButton fabDownload = findViewById(R.id.fab_download);
-        famMenu = findViewById(R.id.multiple_actions);
+        fabDownload = findViewById(R.id.fab_download);
+        fabMenu = findViewById(R.id.multiple_actions);
         spb = findViewById(R.id.spb);
+        llError = findViewById(R.id.ll_error);
+        tvErrorMsg = findViewById(R.id.tv_error_msg);
+        btnRetry = findViewById(R.id.btn_retry);
+        novelInfoScrollView = findViewById(R.id.novel_info_scroll_view);
+        fabContainer = findViewById(R.id.fab_container);
+
+        btnRetry.setOnClickListener(v -> refreshInfo());
+
+        // AdMob
+        AdView mAdView = findViewById(R.id.ad_view);
+        AdRequest adRequest = new AdRequest.Builder().build();
+        mAdView.loadAd(adRequest);
 
         // hide view and set colors
         tvNovelTitle.setText(title);
@@ -136,77 +213,56 @@ public class NovelInfoActivity extends BaseMaterialActivity {
             ImageLoader.getInstance().displayImage(Wenku8API.getCoverURL(aid), ivNovelCover); // move to onCreateView!
         tvLatestChapterNameText.setText(getResources().getText(R.string.novel_item_latest_chapter));
         ibNovelOption.setVisibility(ImageButton.INVISIBLE);
-        fabFavorite.setColorFilter(getResources().getColor(R.color.default_white), PorterDuff.Mode.SRC_ATOP);
-        fabDownload.setColorFilter(getResources().getColor(R.color.default_white), PorterDuff.Mode.SRC_ATOP);
         llCardLayout.setBackgroundResource(R.color.menu_transparent);
         if (GlobalConfig.testInLocalBookshelf(aid)) {
-            fabFavorite.setIcon(R.drawable.ic_favorate_pressed);
+            fabFavorite.setIcon(getResources().getDrawable(R.drawable.ic_favorate_pressed));
+            fabFavorite.setIconTint(null);
         }
 
         // fetch all info
         getSupportActionBar().setTitle(R.string.action_novel_info);
         spb.setVisibility(View.INVISIBLE); // wait for runnable
-        Handler handler = new Handler();
+        Handler handler = new Handler(Looper.getMainLooper());
         handler.postDelayed(() -> {
-            spb.setVisibility(View.VISIBLE);
-            if (from.equals(FromLocal))
-                refreshInfoFromLocal();
-            else
-                refreshInfoFromCloud();
+            isLoading = false; // Reset to allow initial load
+            refreshInfo();
         }, 500);
 
-
         // set on click listeners
-        famMenu.setOnFloatingActionsMenuUpdateListener(new FloatingActionsMenu.OnFloatingActionsMenuUpdateListener() {
-            @Override
-            public void onMenuExpanded() {
-                rlMask.setVisibility(View.VISIBLE);
-            }
-
-            @Override
-            public void onMenuCollapsed() {
-                rlMask.setVisibility(View.INVISIBLE);
-            }
-        });
+        fabMenu.setOnClickListener(v -> toggleMenu());
         rlMask.setOnClickListener(v -> {
             // Collapse the fam
-            if (famMenu.isExpanded())
-                famMenu.collapse();
+            if (isMenuExpanded.get())
+                collapseMenu();
         });
         tvNovelTitle.setBackground(getResources().getDrawable(R.drawable.btn_menu_item));
         tvNovelAuthor.setBackground(getResources().getDrawable(R.drawable.btn_menu_item));
         tvLatestChapter.setBackground(getResources().getDrawable(R.drawable.btn_menu_item));
         tvNovelTitle.setOnClickListener(v -> {
             if (runLoadingChecker()) return;
+            if (mNovelItemMeta == null) return;
 
-            // show aid: title
-            new MaterialDialog.Builder(NovelInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .titleColorRes(R.color.dlgTitleColor)
-                    .backgroundColorRes(R.color.dlgBackgroundColor)
-                    .contentColorRes(R.color.dlgContentColor)
-                    .positiveColorRes(R.color.dlgPositiveButtonColor)
-                    .title(R.string.dialog_content_novel_title)
-                    .content(aid + ": " + mNovelItemMeta.title)
-                    .contentGravity(GravityEnum.CENTER)
-                    .positiveText(R.string.dialog_positive_known)
+            // show aid: title (only when mNovelItemMeta is not null)
+            new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                    .setTitle(R.string.dialog_content_novel_title)
+                    .setMessage(aid + ": " + mNovelItemMeta.title)
+                    .setPositiveButton(R.string.dialog_positive_known, null)
                     .show();
         });
         tvNovelAuthor.setOnClickListener(v -> {
             if (runLoadingChecker()) return;
+            if (mNovelItemMeta == null) return;
 
-            new MaterialDialog.Builder(NovelInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .onPositive((ignored1, ignored2) -> {
+            new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                    .setMessage(R.string.dialog_content_search_author)
+                    .setPositiveButton(R.string.dialog_positive_ok, (ignored1, ignored2) -> {
                         // search author name
                         Intent intent = new Intent(NovelInfoActivity.this, SearchResultActivity.class);
                         intent.putExtra("key", mNovelItemMeta.author);
                         startActivity(intent);
                         overridePendingTransition(R.anim.fade_in, R.anim.hold);
                     })
-                    .content(R.string.dialog_content_search_author)
-                    .positiveText(R.string.dialog_positive_ok)
-                    .negativeText(R.string.dialog_negative_biao)
+                    .setNegativeButton(R.string.dialog_negative_biao, null)
                     .show();
         });
         fabFavorite.setOnClickListener(v -> {
@@ -214,34 +270,41 @@ public class NovelInfoActivity extends BaseMaterialActivity {
 
             // add to favorite
             if(GlobalConfig.testInLocalBookshelf(aid)) {
-                new MaterialDialog.Builder(NovelInfoActivity.this)
-                        .onPositive((ignored1, ignored2) -> {
+                new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                        .setMessage(R.string.dialog_content_sure_to_unfav)
+                        .setPositiveButton(R.string.dialog_positive_yes, (ignored1, ignored2) -> {
                             // delete from cloud first, if succeed then delete from local
                             AsyncRemoveBookFromCloud arbfc = new AsyncRemoveBookFromCloud();
                             arbfc.execute(aid);
                         })
-                        .theme(Theme.LIGHT)
-                        .backgroundColorRes(R.color.dlgBackgroundColor)
-                        .contentColorRes(R.color.dlgContentColor)
-                        .positiveColorRes(R.color.dlgPositiveButtonColor)
-                        .negativeColorRes(R.color.dlgNegativeButtonColor)
-                        .content(R.string.dialog_content_sure_to_unfav)
-                        .contentGravity(GravityEnum.CENTER)
-                        .positiveText(R.string.dialog_positive_yes)
-                        .negativeText(R.string.dialog_negative_preferno)
+                        .setNegativeButton(R.string.dialog_negative_preferno, null)
                         .show();
             }
             else {
                 // not in bookshelf, add it to.
-                GlobalConfig.writeFullFileIntoSaveFolder("intro", aid + "-intro.xml", novelFullMeta);
-                GlobalConfig.writeFullFileIntoSaveFolder("intro", aid + "-introfull.xml", novelFullIntro);
-                GlobalConfig.writeFullFileIntoSaveFolder("intro", aid+ "-volume.xml", novelFullVolume);
-                GlobalConfig.addToLocalBookshelf(aid);
-                if (GlobalConfig.testInLocalBookshelf(aid)) { // in
-                    Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_added), Toast.LENGTH_SHORT).show();
-                    fabFavorite.setIcon(R.drawable.ic_favorate_pressed);
+                if (novelFullMeta == null || novelFullIntro == null || novelFullVolume == null) {
+                    ArrayList<String> nullStuff = new ArrayList<>();
+                    if (novelFullMeta == null) nullStuff.add("meta");
+                    if (novelFullIntro == null) nullStuff.add("intro");
+                    if (novelFullVolume == null) nullStuff.add("volume");
+                    Bundle somethingIsNull = new Bundle();
+                    somethingIsNull.putStringArrayList("novel_info_save_null", nullStuff);
+                    GoogleServicesHelper.logEvent(mFirebaseAnalytics, FirebaseAnalytics.Event.VIEW_ITEM, somethingIsNull);
+
+                    Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.system_loading_please_wait), Toast.LENGTH_SHORT).show();
                 } else {
-                    Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_error), Toast.LENGTH_SHORT).show();
+                    // No null text.
+                    GlobalConfig.writeFullFileIntoSaveFolder("intro", aid + "-intro.xml", novelFullMeta);
+                    GlobalConfig.writeFullFileIntoSaveFolder("intro", aid + "-introfull.xml", novelFullIntro);
+                    GlobalConfig.writeFullFileIntoSaveFolder("intro", aid + "-volume.xml", novelFullVolume);
+                    GlobalConfig.addToLocalBookshelf(aid);
+                    if (GlobalConfig.testInLocalBookshelf(aid)) { // in
+                        Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_added), Toast.LENGTH_SHORT).show();
+                        fabFavorite.setIcon(getResources().getDrawable(R.drawable.ic_favorate_pressed));
+                        fabFavorite.setIconTint(null);
+                    } else {
+                        Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_error), Toast.LENGTH_SHORT).show();
+                    }
                 }
             }
         });
@@ -255,16 +318,10 @@ public class NovelInfoActivity extends BaseMaterialActivity {
 
             // download / update activity or verify downloading action (add to queue)
             // use list dialog to provide more functions
-            new MaterialDialog.Builder(NovelInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .title(R.string.dialog_title_choose_download_option)
-                    .backgroundColorRes(R.color.dlgBackgroundColor)
-                    .titleColorRes(R.color.dlgTitleColor)
-                    .negativeText(R.string.dialog_negative_pass)
-                    .negativeColorRes(R.color.dlgNegativeButtonColor)
-                    .itemsGravity(GravityEnum.CENTER)
-                    .items(R.array.download_option)
-                    .itemsCallback((dialog, view, which, text) -> {
+            new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                    .setTitle(R.string.dialog_title_choose_download_option)
+                    .setNegativeButton(R.string.dialog_negative_pass, null)
+                    .setItems(R.array.download_option, (dialog, which) -> {
                         /*
                          * 0 <string name="dialog_option_check_for_update">检查更新</string>
                          * 1 <string name="dialog_option_update_uncached_volumes">更新下载</string>
@@ -300,6 +357,21 @@ public class NovelInfoActivity extends BaseMaterialActivity {
             else
                 Toast.makeText(this, getResources().getText(R.string.reader_msg_please_refresh_and_retry), Toast.LENGTH_SHORT).show();
         });
+
+        ivNovelCover.setOnClickListener(v -> {
+            if (runLoadingChecker()) return;
+            fetchAndShowNovelCover();
+        });
+
+        mSideSheetHeader.setOnClickListener(v -> {
+            if (mCurrentSelectedVolume == null) return;
+
+            new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                    .setTitle(R.string.dialog_content_volume_title)
+                    .setMessage(mCurrentSelectedVolume.volumeName)
+                    .setPositiveButton(R.string.dialog_positive_known, null)
+                    .show();
+        });
     }
 
     /**
@@ -323,22 +395,18 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         auct.execute(aid, 0);
 
         // show progress
-        pDialog = new MaterialDialog.Builder(NovelInfoActivity.this)
-                .theme(Theme.LIGHT)
-                .content(R.string.dialog_content_downloading)
-                .progress(false, 1, true)
-                .cancelable(true)
-                .cancelListener(dialog12 -> {
+        pDialog = ProgressDialogHelper.show(NovelInfoActivity.this,
+                getString(R.string.dialog_content_downloading),
+                /* indeterminate= */ false, /* cancelable= */ true,
+                /* cancelListener= */ dialog12 -> {
                     isLoading = false;
                     auct.cancel(true);
                     pDialog.dismiss();
                     pDialog = null;
-                })
-                .show();
+                });
 
         pDialog.setProgress(0);
         pDialog.setMaxProgress(1);
-        pDialog.show();
     }
 
     /**
@@ -351,62 +419,47 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         auct.execute(aid, 1);
 
         // show progress
-        pDialog = new MaterialDialog.Builder(NovelInfoActivity.this)
-                .theme(Theme.LIGHT)
-                .content(R.string.dialog_content_downloading)
-                .progress(false, 1, true)
-                .cancelable(true)
-                .cancelListener(dialog1 -> {
+        pDialog = ProgressDialogHelper.show(NovelInfoActivity.this,
+                getString(R.string.dialog_content_downloading),
+                /* indeterminate= */ false, /* cancelable= */ true,
+                /* cancelListener= */ dialog1 -> {
                     isLoading = false;
                     auct.cancel(true);
                     pDialog.dismiss();
                     pDialog = null;
-                })
-                .show();
+                });
 
         pDialog.setProgress(0);
         pDialog.setMaxProgress(1);
-        pDialog.show();
     }
 
     /**
      * 2 <string name="dialog_option_force_update_all">覆盖下载</string>
      */
     private void optionDownloadOverride() {
-        new MaterialDialog.Builder(NovelInfoActivity.this)
-                .onPositive((ignored1, ignored2) -> {
+        new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                .setMessage(R.string.dialog_content_verify_force_update)
+                .setPositiveButton(R.string.dialog_positive_likethis, (ignored1, ignored2) -> {
                     // async task
                     isLoading = true;
                     final AsyncUpdateCacheTask auct = new AsyncUpdateCacheTask();
                     auct.execute(aid, 2);
 
                     // show progress
-                    pDialog = new MaterialDialog.Builder(NovelInfoActivity.this)
-                            .theme(Theme.LIGHT)
-                            .content(R.string.dialog_content_downloading)
-                            .progress(false, 1, true)
-                            .cancelable(true)
-                            .cancelListener(dialog13 -> {
+                    pDialog = ProgressDialogHelper.show(NovelInfoActivity.this,
+                            getString(R.string.dialog_content_downloading),
+                            /* indeterminate= */ false, /* cancelable= */ true,
+                            /* cancelListener= */ dialog13 -> {
                                 isLoading = false;
                                 auct.cancel(true);
                                 pDialog.dismiss();
                                 pDialog = null;
-                            })
-                            .show();
+                            });
 
                     pDialog.setProgress(0);
                     pDialog.setMaxProgress(1);
-                    pDialog.show();
                 })
-                .theme(Theme.LIGHT)
-                .backgroundColorRes(R.color.dlgBackgroundColor)
-                .contentColorRes(R.color.dlgContentColor)
-                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                .content(R.string.dialog_content_verify_force_update)
-                .contentGravity(GravityEnum.CENTER)
-                .positiveText(R.string.dialog_positive_likethis)
-                .negativeText(R.string.dialog_negative_preferno)
+                .setNegativeButton(R.string.dialog_negative_preferno, null)
                 .show();
     }
 
@@ -419,18 +472,28 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         for(int i = 0; i < listVolume.size(); i ++)
             volumes[i] = listVolume.get(i).volumeName;
 
-        new MaterialDialog.Builder(NovelInfoActivity.this)
-                .theme(Theme.LIGHT)
-                .title(R.string.dialog_option_select_and_update)
-                .items(volumes)
-                .itemsCallbackMultiChoice(null, (dialog, which, text) -> {
-                    if (which == null || which.length == 0) return true;
+        new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                .setTitle(R.string.dialog_option_select_and_update)
+                .setMultiChoiceItems(volumes, null, (dialog, which, isChecked) -> {
+                    // Do nothing on choice click, we handle it in positive button
+                })
+                .setPositiveButton(R.string.dialog_positive_ok, (dialog, which) -> {
+                    // Get selected items
+                    androidx.appcompat.app.AlertDialog alertDialog = (androidx.appcompat.app.AlertDialog) dialog;
+                    android.util.SparseBooleanArray checkedItemPositions = alertDialog.getListView().getCheckedItemPositions();
+                    List<Integer> selectedIndices = new ArrayList<>();
+                    for (int i = 0; i < checkedItemPositions.size(); i++) {
+                        int index = checkedItemPositions.keyAt(i);
+                        if (checkedItemPositions.valueAt(i)) {
+                            selectedIndices.add(index);
+                        }
+                    }
+
+                    if (selectedIndices.isEmpty()) return;
 
                     AsyncDownloadVolumes adv = new AsyncDownloadVolumes();
-                    adv.execute(which);
-                    return true;
+                    adv.execute(selectedIndices.toArray(new Integer[0]));
                 })
-                .positiveText(R.string.dialog_positive_ok)
                 .show();
     }
 
@@ -454,12 +517,8 @@ public class NovelInfoActivity extends BaseMaterialActivity {
     @Override
     public boolean onOptionsItemSelected(MenuItem menuItem) {
         if (menuItem.getItemId() == android.R.id.home) {
-            if(Build.VERSION.SDK_INT < 21)
-                finish();
-            else
-                finishAfterTransition(); // end directly
-        }
-        else if (menuItem.getItemId() == R.id.action_continue_read_progress) {
+            finishAfterTransition(); // end directly
+        } else if (menuItem.getItemId() == R.id.action_continue_read_progress) {
             if (runLoadingChecker()) return true;
 
             // show dialog, jump to last read position
@@ -498,12 +557,14 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         }
         final VolumeList volumeList_bak = savedVolumeList;
 
-        new MaterialDialog.Builder(this)
-                .onPositive((ignored1, ignored2) -> {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.reader_v1_notice)
+                .setMessage(getResources().getString(R.string.reader_jump_last) + "\n" + title + "\n" + savedVolumeList.volumeName + "\n" + chapterInfo.chapterName)
+                .setPositiveButton(R.string.dialog_positive_sure, (ignored1, ignored2) -> {
                     // jump to reader activity
                     Intent intent = new Intent(NovelInfoActivity.this, Wenku8ReaderActivityV1.class);
                     intent.putExtra("aid", aid);
-                    intent.putExtra("volume", volumeList_bak);
+                    intent.putExtra("vid", volumeList_bak.vid);
                     intent.putExtra("cid", cid);
 
                     // test does file exist
@@ -519,33 +580,8 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                     startActivity(intent);
                     overridePendingTransition(R.anim.fade_in, R.anim.hold); // fade in animation
                 })
-                .theme(Theme.LIGHT)
-                .titleColorRes(R.color.default_text_color_black)
-                .backgroundColorRes(R.color.dlgBackgroundColor)
-                .contentColorRes(R.color.dlgContentColor)
-                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                .title(R.string.reader_v1_notice)
-                .content(getResources().getString(R.string.reader_jump_last) + "\n" + title + "\n" + savedVolumeList.volumeName + "\n" + chapterInfo.chapterName)
-                .contentGravity(GravityEnum.CENTER)
-                .positiveText(R.string.dialog_positive_sure)
-                .negativeText(R.string.dialog_negative_biao)
+                .setNegativeButton(R.string.dialog_negative_biao, null)
                 .show();
-    }
-
-    @Override
-    public void onBackPressed() {
-        // end famMenu first
-        if(famMenu.isExpanded()) {
-            famMenu.collapse();
-            return;
-        }
-
-        // normal exit
-        if(Build.VERSION.SDK_INT < 21)
-            finish();
-        else
-            finishAfterTransition(); // end directly
     }
 
     private class FetchInfoAsyncTask extends AsyncTask<Integer, Integer, Integer> {
@@ -554,79 +590,106 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         @Override
         protected Integer doInBackground(Integer... params) {
             // transfer '1' to this task represent loading from local
-            if(params != null && params.length == 1 && params[0] == 1)
+            if (params != null && params.length == 1 && params[0] == 1)
                 fromLocal = true;
 
-            // get novel full meta
-            try {
-                if(fromLocal) {
-                    novelFullMeta = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-intro.xml");
-                    if(novelFullMeta.isEmpty()) return -9;
-                }
-                else {
+            ExecutorService executor = Executors.newFixedThreadPool(3);
+
+            // Task 1: get novel full meta
+            Callable<String> metaTask = () -> {
+                if (fromLocal) {
+                    String meta = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-intro.xml");
+                    if (meta.isEmpty()) throw new Exception("Empty meta from local");
+                    return meta;
+                } else {
                     ContentValues cv = Wenku8API.getNovelFullMeta(aid, GlobalConfig.getCurrentLang());
-                    byte[] byteNovelFullMeta = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
-                    if (byteNovelFullMeta == null) return -1;
-                    novelFullMeta = new String(byteNovelFullMeta, "UTF-8"); // save
+                    byte[] byteMeta = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
+                    if (byteMeta == null) throw new Exception("Network error for meta");
+                    return new String(byteMeta, "UTF-8");
                 }
-                mNovelItemMeta = Wenku8Parser.parseNovelFullMeta(novelFullMeta);
-                if(mNovelItemMeta == null) return -1;
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
-                return -2;
-            }
-            publishProgress(1); // procedure 1/3
+            };
 
-            // get novel full intro
-            try {
-                if(fromLocal) {
-                    novelFullIntro = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-introfull.xml");
-                    if(novelFullIntro.isEmpty()) return -9;
+            // Task 2: get novel full intro
+            Callable<String> introTask = () -> {
+                if (fromLocal) {
+                    String intro = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-introfull.xml");
+                    if (intro.isEmpty()) throw new Exception("Empty intro from local");
+                    return intro;
+                } else {
+                    ContentValues cv = Wenku8API.getNovelFullIntro(aid, GlobalConfig.getCurrentLang());
+                    byte[] byteIntro = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
+                    if (byteIntro == null) throw new Exception("Network error for intro");
+                    return new String(byteIntro, "UTF-8");
                 }
-                else {
-                    ContentValues cvFullIntroRequest = Wenku8API.getNovelFullIntro(aid, GlobalConfig.getCurrentLang());
-                    byte[] byteNovelFullInfo = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cvFullIntroRequest);
-                    if (byteNovelFullInfo == null) return -1;
-                    novelFullIntro = new String(byteNovelFullInfo, "UTF-8"); // save
-                }
-                mNovelItemMeta.fullIntro = novelFullIntro;
-                if(mNovelItemMeta.fullIntro.length() == 0) return -1;
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
-                return -2;
-            }
-            publishProgress(2);
+            };
 
-            // get novel chapter list
-            try {
-                if(fromLocal) {
-                    novelFullVolume = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-volume.xml");
-                    if(novelFullVolume.isEmpty()) return -9;
-                }
-                else {
+            // Task 3: get novel chapter list
+            Callable<String> volumeTask = () -> {
+                if (fromLocal) {
+                    String volume = GlobalConfig.loadFullFileFromSaveFolder("intro", aid + "-volume.xml");
+                    if (volume.isEmpty()) throw new Exception("Empty volume from local");
+                    return volume;
+                } else {
                     ContentValues cv = Wenku8API.getNovelIndex(aid, GlobalConfig.getCurrentLang());
-                    byte[] byteNovelChapterList = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
-                    if (byteNovelChapterList == null) return -1;
-                    novelFullVolume = new String(byteNovelChapterList, "UTF-8"); // save
+                    byte[] byteVolume = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
+                    if (byteVolume == null) throw new Exception("Network error for volume");
+                    return new String(byteVolume, "UTF-8");
                 }
+            };
 
-                // update the volume list
-                listVolume = Wenku8Parser.getVolumeList(novelFullVolume);
-                if(listVolume.isEmpty()) return -1;
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
-                return -2;
+            Future<String> metaFuture = executor.submit(metaTask);
+            Future<String> introFuture = executor.submit(introTask);
+            Future<String> volumeFuture = executor.submit(volumeTask);
+
+            try {
+                novelFullMeta = metaFuture.get();
+                novelFullIntro = introFuture.get();
+                novelFullVolume = volumeFuture.get();
+            } catch (InterruptedException | ExecutionException e) {
+                CrashReporter.recordException("NovelInfoActivity.FetchInfoAsyncTask", e);
+                String msg = e.getMessage();
+                if (msg != null && msg.contains("local")) return -9;
+                return -1;
+            } finally {
+                executor.shutdown();
             }
-            publishProgress(3); // procedure 3/3
+
+            // Parse Meta
+            mNovelItemMeta = Wenku8Parser.parseNovelFullMeta(novelFullMeta);
+            if (mNovelItemMeta == null) return -1;
+
+            // Assign Intro
+            mNovelItemMeta.fullIntro = novelFullIntro;
+            if (mNovelItemMeta.fullIntro.isEmpty()) return -1;
+
+            // Parse Volume
+            listVolume = Wenku8Parser.getVolumeList(novelFullVolume);
+            if (listVolume.isEmpty()) return -1;
+
+            // The readers are started with aid + vid and rebuild the volume from this file, so
+            // it has to exist for any novel that can reach a reader -- not just the ones added
+            // to the bookshelf or downloaded, which were the only writers before. Written after
+            // the parse rather than straight off the wire so a response that does not parse
+            // cannot overwrite a good cached index with a broken one.
+            //
+            // Recorded when it fails because this is the one case the change makes worse: a
+            // device whose storage cannot be written could previously still read a novel, since
+            // the volume travelled in the Intent, and now cannot open the reader at all. Every
+            // other write in the app fails silently the same way, so without this there would
+            // be no way to tell that story apart from a reader that simply refuses to open.
+            if (!fromLocal && !GlobalConfig.cacheVolumeIndex(aid, novelFullVolume)) {
+                CrashReporter.log("Failed to cache the volume index (aid=" + aid
+                        + ", length=" + novelFullVolume.length() + "); readers cannot open");
+            }
 
             // Check local volume files exists, express in another color
-            for(VolumeList vl : listVolume) {
-                for(ChapterInfo ci : vl.chapterList) {
-                    if(!LightCache.testFileExist(GlobalConfig.getFirstFullSaveFilePath() + "novel" + File.separator + ci.cid + ".xml")
+            for (VolumeList vl : listVolume) {
+                for (ChapterInfo ci : vl.chapterList) {
+                    if (!LightCache.testFileExist(GlobalConfig.getFirstFullSaveFilePath() + "novel" + File.separator + ci.cid + ".xml")
                             && !LightCache.testFileExist(GlobalConfig.getSecondFullSaveFilePath() + "novel" + File.separator + ci.cid + ".xml"))
                         break;
 
-                    if(vl.chapterList.indexOf(ci) == vl.chapterList.size() - 1)
+                    if (vl.chapterList.indexOf(ci) == vl.chapterList.size() - 1)
                         vl.inLocal = true;
                 }
             }
@@ -635,54 +698,105 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         }
 
         @Override
-        protected void onProgressUpdate(Integer... values) {
-            super.onProgressUpdate(values);
-
-            switch (values[0]) {
-                case 1:
-                    // update general info
-                    tvNovelAuthor.setPaintFlags(tvNovelAuthor.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); // with hyperlink
-                    tvLatestChapter.setPaintFlags(tvLatestChapter.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); // with hyperlink
-
-                    tvNovelTitle.setText(mNovelItemMeta.title);
-                    tvNovelAuthor.setText(mNovelItemMeta.author);
-                    tvNovelStatus.setText(mNovelItemMeta.bookStatus);
-                    tvNovelUpdate.setText(mNovelItemMeta.lastUpdate);
-                    tvLatestChapter.setText(mNovelItemMeta.latestSectionName);
-                    if(NovelInfoActivity.this.getSupportActionBar() != null)
-                        NovelInfoActivity.this.getSupportActionBar().setTitle(mNovelItemMeta.title); // set action bar title
-                    break;
-
-                case 2:
-                    //update novel info full
-                    tvNovelFullIntro.setText(mNovelItemMeta.fullIntro);
-                    break;
-
-                case 3:
-                    // let onPostExecute do
-                    break;
-            }
-        }
-
-        @Override
         protected void onPostExecute(Integer integer) {
+            // The loading flag is Activity state rather than view state, so it is reset
+            // regardless -- same ordering as AsyncGetNovelItemList in NovelItemListFragment.
             isLoading = false;
-            spb.progressiveStop();
             super.onPostExecute(integer);
 
-            if( integer == -1 ) {
-                Toast.makeText(NovelInfoActivity.this, "FetchInfoAsyncTask:onPostExecute network error", Toast.LENGTH_SHORT).show();
+            // Everything below touches views. onPostExecute runs whether or not the Activity
+            // is still alive, and this task is as slow as the network is, so a rotation or a
+            // back press during the fetch used to land here on a destroyed Activity.
+            if (isFinishing() || isDestroyed()) return;
+
+            spb.setVisibility(View.INVISIBLE);
+
+            if (integer == -1) {
+                // Network error or parse error
+                llError.setVisibility(View.VISIBLE);
+                novelInfoScrollView.setVisibility(View.GONE);
+                fabContainer.setVisibility(View.GONE);
+                tvErrorMsg.setText(R.string.system_network_error);
                 return;
-            }
-            else if(integer == -9) {
-                Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_intro_load_failed), Toast.LENGTH_SHORT).show();
+            } else if (integer == -9) {
+                // Local file error
+                llError.setVisibility(View.VISIBLE);
+                novelInfoScrollView.setVisibility(View.GONE);
+                fabContainer.setVisibility(View.GONE);
+                tvErrorMsg.setText(R.string.bookshelf_intro_load_failed);
                 // TODO: a better fix with optionCheckUpdates(), but need to avoid recursive calls.
                 return;
-            }
-            else if(integer < 0)
+            } else if (integer < 0) {
+                llError.setVisibility(View.VISIBLE);
+                novelInfoScrollView.setVisibility(View.GONE);
+                fabContainer.setVisibility(View.GONE);
+                tvErrorMsg.setText("Unknown error occurred");
                 return; // ignore other exceptions
+            }
+
+            // Success
+            llError.setVisibility(View.GONE);
+            novelInfoScrollView.setVisibility(View.VISIBLE);
+            fabContainer.setVisibility(View.VISIBLE);
+
+            // update general info
+            tvNovelAuthor.setPaintFlags(tvNovelAuthor.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); // with hyperlink
+            tvLatestChapter.setPaintFlags(tvLatestChapter.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG); // with hyperlink
+
+            tvNovelTitle.setText(mNovelItemMeta.title);
+            tvNovelAuthor.setText(mNovelItemMeta.author);
+            tvNovelStatus.setText(mNovelItemMeta.bookStatus);
+            tvNovelUpdate.setText(mNovelItemMeta.lastUpdate);
+            tvLatestChapter.setText(mNovelItemMeta.latestSectionName);
+            if (NovelInfoActivity.this.getSupportActionBar() != null)
+                NovelInfoActivity.this.getSupportActionBar().setTitle(mNovelItemMeta.title); // set action bar title
+
+            // update novel info full
+            tvNovelFullIntro.setText(mNovelItemMeta.fullIntro);
+
             buildVolumeList();
         }
+    }
+
+    private void toggleMenu() {
+        if (isMenuExpanded.get()) {
+            collapseMenu();
+        } else {
+            expandMenu();
+        }
+    }
+
+    private void expandMenu() {
+        isMenuExpanded.set(true);
+        fabMenu.animate().rotation(135f).setDuration(300).setInterpolator(new OvershootInterpolator()).start();
+        
+        // Favorite FAB
+        fabFavorite.setVisibility(View.VISIBLE);
+        fabFavorite.setAlpha(0f);
+        fabFavorite.setScaleX(0f);
+        fabFavorite.setScaleY(0f);
+        fabFavorite.setTranslationY(100f);
+        fabFavorite.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0f).setDuration(300).setInterpolator(new OvershootInterpolator()).start();
+        
+        // Download FAB
+        fabDownload.setVisibility(View.VISIBLE);
+        fabDownload.setAlpha(0f);
+        fabDownload.setScaleX(0f);
+        fabDownload.setScaleY(0f);
+        fabDownload.setTranslationY(50f);
+        fabDownload.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0f).setDuration(300).setInterpolator(new OvershootInterpolator()).start();
+        
+        rlMask.setVisibility(View.VISIBLE);
+    }
+
+    private void collapseMenu() {
+        isMenuExpanded.set(false);
+        fabMenu.animate().rotation(0f).setDuration(300).setInterpolator(new OvershootInterpolator()).start();
+        
+        fabFavorite.animate().alpha(0f).scaleX(0f).scaleY(0f).translationY(100f).setDuration(300).withEndAction(() -> fabFavorite.setVisibility(View.GONE)).start();
+        fabDownload.animate().alpha(0f).scaleX(0f).scaleY(0f).translationY(50f).setDuration(300).withEndAction(() -> fabDownload.setVisibility(View.GONE)).start();
+        
+        rlMask.setVisibility(View.INVISIBLE);
     }
 
     private void buildVolumeList() {
@@ -697,6 +811,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         // set text and listeners
         TextView tv = rl.findViewById(R.id.chapter_title);
         tv.setText(vl.volumeName);
+
         if(vl.inLocal)
           ((TextView) rl.findViewById(R.id.chapter_status)).setText(getResources().getString(R.string.bookshelf_inlocal));
 
@@ -706,30 +821,108 @@ public class NovelInfoActivity extends BaseMaterialActivity {
           btn.setBackgroundColor(Color.LTGRAY);
         }
         btn.setOnLongClickListener(v -> {
-          new MaterialDialog.Builder(NovelInfoActivity.this)
-              .theme(Theme.LIGHT)
-              .onPositive((ignored1, ignored2) -> {
-                vl.cleanLocalCache();
+          new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+              .setMessage(R.string.dialog_sure_to_clear_cache)
+              .setPositiveButton(R.string.dialog_positive_want, (ignored1, ignored2) -> {
+                LightCache.cleanLocalCache(vl);
                 ((TextView) rl.findViewById(R.id.chapter_status)).setText("");
               })
-              .content(R.string.dialog_sure_to_clear_cache)
-              .positiveText(R.string.dialog_positive_want)
-              .negativeText(R.string.dialog_negative_biao)
+              .setNegativeButton(R.string.dialog_negative_biao, null)
               .show();
           return true;
         });
         btn.setOnClickListener(v -> {
-          // jump to chapter select activity
-          Intent intent = new Intent(NovelInfoActivity.this, NovelChapterActivity.class);
-          intent.putExtra("aid", aid);
-          intent.putExtra("volume", vl);
-          intent.putExtra("from", from);
-          startActivity(intent);
+            buildChapterList(vl);
+            mDrawerLayout.openDrawer(GravityCompat.END);
         });
 
         // add to scroll view
         mLinearLayout.addView(rl);
       }
+    }
+
+    private void buildChapterList(final VolumeList volumeList) {
+        mCurrentSelectedVolume = volumeList;
+        mSideSheetHeader.setText(volumeList.volumeName);
+        mChapterListLayout.removeAllViews();
+
+        final GlobalConfig.ReadSavesV1 rs = GlobalConfig.getReadSavesRecordV1(aid);
+        for(final ChapterInfo ci : volumeList.chapterList) {
+            // get view
+            RelativeLayout rl = (RelativeLayout) LayoutInflater.from(NovelInfoActivity.this).inflate(R.layout.view_novel_chapter_item, null);
+
+            TextView tv = rl.findViewById(R.id.chapter_title);
+            tv.setText(ci.chapterName);
+
+            final RelativeLayout btn = rl.findViewById(R.id.chapter_btn);
+            // added indicator for last read chapter
+            if (rs != null && rs.cid == ci.cid) {
+                btn.setBackgroundColor(Color.LTGRAY);
+            }
+            btn.setOnClickListener(ignored -> {
+                // jump to reader activity
+                Intent intent = new Intent(NovelInfoActivity.this, Wenku8ReaderActivityV1.class);
+                intent.putExtra("aid", aid);
+                intent.putExtra("vid", volumeList.vid);
+                intent.putExtra("cid", ci.cid);
+
+                // test does file exist
+                if (from.equals(FromLocal)
+                    && !LightCache.testFileExist(GlobalConfig.getDefaultStoragePath() + GlobalConfig.saveFolderName + File.separator + "novel" + File.separator + ci.cid + ".xml")
+                    && !LightCache.testFileExist(GlobalConfig.getBackupStoragePath() + GlobalConfig.saveFolderName + File.separator + "novel" + File.separator + ci.cid + ".xml")) {
+                    intent.putExtra("from", "cloud"); // from cloud
+                }
+                else {
+                    intent.putExtra("from", from); // from "fav"
+                }
+
+                startActivity(intent);
+                overridePendingTransition(R.anim.fade_in, R.anim.hold); // fade in animation
+            });
+
+            View optionBtn = btn.findViewById(R.id.novel_option);
+            optionBtn.setVisibility(View.VISIBLE);
+            optionBtn.setOnClickListener(ignored -> {
+                new MaterialAlertDialogBuilder(NovelInfoActivity.this)
+                    .setTitle(R.string.system_choose_reader_engine)
+                    .setItems(R.array.reader_engine_option, (ignored1, which) -> {
+                        Class readerClass = Wenku8ReaderActivityV1.class;
+                        switch (which) {
+                            case 0:
+                                // V1
+                                readerClass = Wenku8ReaderActivityV1.class;
+                                break;
+
+                            case 1:
+                                // old
+                                readerClass = VerticalReaderActivity.class;
+                                break;
+                        }
+
+                        Intent intent = new Intent(NovelInfoActivity.this, readerClass);
+                        intent.putExtra("aid", aid);
+                        intent.putExtra("vid", volumeList.vid);
+                        intent.putExtra("cid", ci.cid);
+
+                        // test does file exist
+                        if (from.equals(FromLocal)
+                            && !LightCache.testFileExist(GlobalConfig.getDefaultStoragePath() + GlobalConfig.saveFolderName + File.separator + "novel" + File.separator + ci.cid + ".xml")
+                            && !LightCache.testFileExist(GlobalConfig.getBackupStoragePath() + GlobalConfig.saveFolderName + File.separator + "novel" + File.separator + ci.cid + ".xml")) {
+                            // jump to reader activity
+                            intent.putExtra("from", "cloud"); // from cloud
+                        } else {
+                            intent.putExtra("from", from); // from "fav"
+                        }
+
+                        startActivity(intent);
+                        overridePendingTransition(R.anim.fade_in, R.anim.hold); // fade in animation
+                    })
+                    .show();
+            });
+
+            // add to scroll view
+            mChapterListLayout.addView(rl);
+        }
     }
 
     class AsyncUpdateCacheTask extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
@@ -781,7 +974,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                 GlobalConfig.writeFullFileIntoSaveFolder("intro", taskAid + "-volume.xml", volumeXml);
 
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("NovelInfoActivity.AsyncUpdateCacheTask", e);
                 return Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING;
             }
             if(operationType == 0) return Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED; // update info
@@ -802,11 +995,11 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                         // load from local first
                         if (!isLoading) return Wenku8Error.ErrorCode.USER_CANCELLED_TASK; // calcel
                         String xml = GlobalConfig.loadFullFileFromSaveFolder("novel", tempCi.cid + ".xml"); // prevent empty file
-                        if (xml.length() == 0 || operationType == 2) {
+                        if (xml.isEmpty() || operationType == 2) {
                             byte[] tempXml = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
                             if (tempXml == null) return Wenku8Error.ErrorCode.NETWORK_ERROR; // network error
                             xml = new String(tempXml, "UTF-8");
-                            if(xml.trim().length() == 0) return Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING;
+                            if(xml.trim().isEmpty()) return Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING;
                             GlobalConfig.writeFullFileIntoSaveFolder("novel", tempCi.cid + ".xml", xml);
                         }
 
@@ -848,7 +1041,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                         publishProgress(++current); // update progress
 
                     } catch (UnsupportedEncodingException e) {
-                        e.printStackTrace();
+                        CrashReporter.recordException("NovelInfoActivity.AsyncUpdateCacheTask.saveChapter", e);
                     }
                 }
             }
@@ -865,19 +1058,29 @@ public class NovelInfoActivity extends BaseMaterialActivity {
 
         protected void onPostExecute(Wenku8Error.ErrorCode result)
         {
+            // Cleared regardless: a stuck flag outlives the views it guards.
+            isLoading = false;
+            // The dialog is dismissed before the guard, not after: ProgressDialogHelper
+            // .dismiss() is already safe on a gone window, and skipping it would leak the
+            // dialog instead of crashing on it.
+            if (pDialog != null) pDialog.dismiss();
+
+            // The toasts and refreshVolumeListUI() below need a live Activity.
+            if (isFinishing() || isDestroyed()) return;
+
             if (result == Wenku8Error.ErrorCode.USER_CANCELLED_TASK) {
                 // user cancelled
                 Toast.makeText(NovelInfoActivity.this, R.string.system_manually_cancelled, Toast.LENGTH_LONG).show();
                 if (pDialog != null)
                     pDialog.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 isLoading = false;
                 return;
             } else if (result == Wenku8Error.ErrorCode.NETWORK_ERROR) {
                 Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.system_network_error), Toast.LENGTH_LONG).show();
                 if (pDialog != null)
                     pDialog.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 isLoading = false;
                 return;
             } else if (result == Wenku8Error.ErrorCode.XML_PARSE_FAILED
@@ -885,7 +1088,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                 Toast.makeText(NovelInfoActivity.this, "Server returned strange data! (copyright reason?)", Toast.LENGTH_LONG).show();
                 if (pDialog != null)
                     pDialog.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 isLoading = false;
                 return;
             }
@@ -901,17 +1104,14 @@ public class NovelInfoActivity extends BaseMaterialActivity {
     }
 
     class AsyncRemoveBookFromCloud extends AsyncTask<Integer, Integer, Wenku8Error.ErrorCode> {
-        MaterialDialog md;
+        ProgressDialogHelper md;
 
         @Override
         protected void onPreExecute() {
             super.onPreExecute();
-            md = new MaterialDialog.Builder(NovelInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .content(R.string.dialog_content_novel_remove_from_cloud)
-                    .contentColorRes(R.color.dlgContentColor)
-                    .progress(true, 0)
-                    .show();
+            md = ProgressDialogHelper.show(NovelInfoActivity.this,
+                    getString(R.string.dialog_content_novel_remove_from_cloud),
+                    /* indeterminate= */ true, /* cancelable= */ false, /* cancelListener= */ null);
         }
 
         @Override
@@ -958,7 +1158,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                     }
                 }
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("NovelInfoActivity.AsyncRemoveBookFromCloud", e);
                 return Wenku8Error.ErrorCode.BYTE_TO_STRING_EXCEPTION;
             }
         }
@@ -967,11 +1167,17 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         protected void onPostExecute(Wenku8Error.ErrorCode err) {
             super.onPostExecute(err);
 
-            md.dismiss();
+            // Dismissed before the guard; see AsyncUpdateCacheTask above.
+            if (md != null) md.dismiss();
+
+            if (isFinishing() || isDestroyed()) return;
+
             if(err == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED) {
                 Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.bookshelf_removed), Toast.LENGTH_SHORT).show();
-                if(fabFavorite != null)
-                    fabFavorite.setIcon(R.drawable.ic_favorate);
+                if(fabFavorite != null) {
+                    fabFavorite.setIcon(getResources().getDrawable(R.drawable.ic_favorate));
+                    fabFavorite.setIconTint(ColorStateList.valueOf(getResources().getColor(R.color.default_white)));
+                }
             }
             else
                 Toast.makeText(NovelInfoActivity.this, err.toString(), Toast.LENGTH_SHORT).show();
@@ -979,7 +1185,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
     }
 
     private class AsyncDownloadVolumes extends AsyncTask<Integer[], Integer, Wenku8Error.ErrorCode> {
-        private MaterialDialog md;
+        private ProgressDialogHelper md;
         private boolean loading = false;
         private int size_a;
 
@@ -987,13 +1193,10 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         protected void onPreExecute() {
             super.onPreExecute();
             loading = true;
-            md = new MaterialDialog.Builder(NovelInfoActivity.this)
-                    .theme(Theme.LIGHT)
-                    .content(R.string.dialog_content_downloading)
-                    .progress(false, 1, true)
-                    .cancelable(true)
-                    .cancelListener(dialog -> loading = false)
-                    .show();
+            md = ProgressDialogHelper.show(NovelInfoActivity.this,
+                    getString(R.string.dialog_content_downloading),
+                    /* indeterminate= */ false, /* cancelable= */ true,
+                    /* cancelListener= */ dialog -> loading = false);
             md.setProgress(0);
             md.setMaxProgress(1);
             size_a = 0;
@@ -1014,11 +1217,11 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                         // load from local first
                         if (!loading) return Wenku8Error.ErrorCode.USER_CANCELLED_TASK; // cancel
                         String xml = GlobalConfig.loadFullFileFromSaveFolder("novel", tempCi.cid + ".xml"); // prevent empty file
-                        if (xml.length() == 0) {
+                        if (xml.isEmpty()) {
                             byte[] tempXml = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
                             if (tempXml == null) return Wenku8Error.ErrorCode.NETWORK_ERROR; // network error
                             xml = new String(tempXml, "UTF-8");
-                            if(xml.trim().length() == 0) return Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING;
+                            if(xml.trim().isEmpty()) return Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING;
                             GlobalConfig.writeFullFileIntoSaveFolder("novel", tempCi.cid + ".xml", xml);
                         }
 
@@ -1059,7 +1262,7 @@ public class NovelInfoActivity extends BaseMaterialActivity {
                         publishProgress(++current); // update progress
 
                     } catch (UnsupportedEncodingException e) {
-                        e.printStackTrace();
+                        CrashReporter.recordException("NovelInfoActivity.AsyncDownloadVolumes", e);
                     }
                 }
             }
@@ -1077,24 +1280,31 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         @Override
         protected void onPostExecute(Wenku8Error.ErrorCode errorCode) {
             super.onPostExecute(errorCode);
+
+            // loading is this task's own field, so it dies with the task -- nothing to reset
+            // here. The dialog is dismissed before the guard; see AsyncUpdateCacheTask above.
+            if (md != null) md.dismiss();
+
+            if (isFinishing() || isDestroyed()) return;
+
             if (errorCode == Wenku8Error.ErrorCode.USER_CANCELLED_TASK) {
                 // user cancelled
                 Toast.makeText(NovelInfoActivity.this, R.string.system_manually_cancelled, Toast.LENGTH_LONG).show();
                 if (md != null) md.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 loading = false;
                 return;
             } else if (errorCode == Wenku8Error.ErrorCode.NETWORK_ERROR) {
                 Toast.makeText(NovelInfoActivity.this, getResources().getString(R.string.system_network_error), Toast.LENGTH_LONG).show();
                 if (md != null) md.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 loading = false;
                 return;
             } else if (errorCode == Wenku8Error.ErrorCode.XML_PARSE_FAILED
                     || errorCode == Wenku8Error.ErrorCode.SERVER_RETURN_NOTHING) {
                 Toast.makeText(NovelInfoActivity.this, "Server returned strange data! (copyright reason?)", Toast.LENGTH_LONG).show();
                 if (md != null) md.dismiss();
-                onResume();
+                refreshVolumeListUI();
                 loading = false;
                 return;
             }
@@ -1105,6 +1315,15 @@ public class NovelInfoActivity extends BaseMaterialActivity {
             if (md != null) md.dismiss();
             refreshInfoFromLocal();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        // Suppresses the callbacks of anything still in flight. The guards inside those
+        // callbacks make a late delivery survivable; this stops it being delivered at all,
+        // and drops the task's implicit reference back to this Activity.
+        tracker.cancelAll();
+        super.onDestroy();
     }
 
     @Override
@@ -1121,20 +1340,92 @@ public class NovelInfoActivity extends BaseMaterialActivity {
         }
 
         // refresh when back from reader activity
+        refreshVolumeListUI();
+    }
+
+    /**
+     * Safely refreshes the volume list UI without calling onResume().
+     * This avoids FragmentManager crashes when called from AsyncTask callbacks
+     * after the activity may have been destroyed.
+     */
+    private void refreshVolumeListUI() {
+        if (isFinishing() || isDestroyed()) return;
+
         buildVolumeList();
+        if (mCurrentSelectedVolume != null) {
+            buildChapterList(mCurrentSelectedVolume);
+        }
     }
 
+    private void refreshInfo() {
+        if (from.equals(FromLocal))
+            refreshInfoFromLocal();
+        else
+            refreshInfoFromCloud();
+    }
+
+    /**
+     * Fills the screen from the three documents cached on the device.
+     *
+     * <p>Started on {@link AsyncTask#THREAD_POOL_EXECUTOR}, not through {@code execute()}, which
+     * would use the serial one. That queue is a single one for the whole process, and
+     * {@code MainActivity.onResume} puts two network downloads on it -- the version check and the
+     * notification message. On a slow connection they hold it for their timeouts, and this task,
+     * which only has to read three local files, waited behind them with the progress bar up. The
+     * novel then appeared the moment the network gave up, which looks exactly like the local read
+     * being the slow part.
+     */
     private void refreshInfoFromLocal() {
+        if (isLoading) return;
         isLoading = true;
-        spb.progressiveStart();
-        FetchInfoAsyncTask fetchInfoAsyncTask = new FetchInfoAsyncTask();
-        fetchInfoAsyncTask.execute(1); // load from local
+        llError.setVisibility(View.GONE);
+        spb.setVisibility(View.VISIBLE);
+        FetchInfoAsyncTask fetchInfoAsyncTask = tracker.track(new FetchInfoAsyncTask());
+        fetchInfoAsyncTask.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, 1); // 1 = from local
     }
 
+    /** As {@link #refreshInfoFromLocal()}, and queued behind the same unrelated work without this. */
     private void refreshInfoFromCloud() {
+        if (isLoading) return;
         isLoading = true;
-        spb.progressiveStart();
-        FetchInfoAsyncTask fetchInfoAsyncTask = new FetchInfoAsyncTask();
-        fetchInfoAsyncTask.execute();
+        llError.setVisibility(View.GONE);
+        spb.setVisibility(View.VISIBLE);
+        FetchInfoAsyncTask fetchInfoAsyncTask = tracker.track(new FetchInfoAsyncTask());
+        fetchInfoAsyncTask.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+    }
+
+    private void fetchAndShowNovelCover() {
+        pDialog = ProgressDialogHelper.show(NovelInfoActivity.this,
+                getString(R.string.system_loading_please_wait),
+                /* indeterminate= */ true, /* cancelable= */ true,
+                /* cancelListener= */ dialog -> {
+                    if (pDialog != null) pDialog.dismiss();
+                    pDialog = null;
+                });
+
+        new Thread(() -> {
+            try {
+                ContentValues cv = Wenku8API.getNovelCover(aid);
+                byte[] data = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, cv);
+                if (data == null || data.length == 0) throw new Exception("Fetch failed");
+
+                String fileName = "full_cover_" + aid + ".jpg";
+                if (GlobalConfig.saveNovelCoverImage(fileName, data)) {
+                    runOnUiThread(() -> {
+                        if (pDialog != null) pDialog.dismiss();
+                        Intent intent = new Intent(NovelInfoActivity.this, ViewImageDetailActivity.class);
+                        intent.putExtra("path", GlobalConfig.getExistingNovelContentImagePath(fileName));
+                        startActivity(intent);
+                    });
+                } else {
+                    throw new Exception("Save failed");
+                }
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (pDialog != null) pDialog.dismiss();
+                    Toast.makeText(NovelInfoActivity.this, "Failed to load high-res cover", Toast.LENGTH_SHORT).show();
+                });
+            }
+        }).start();
     }
 }

@@ -15,16 +15,15 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.Toast;
 
-import com.google.firebase.analytics.FirebaseAnalytics;
-import com.nononsenseapps.filepicker.FilePickerActivity;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.util.LightCache;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.File;
 import java.io.FileNotFoundException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -47,7 +46,7 @@ public class MenuBackgroundSelectorActivity extends BaseMaterialActivity {
         initMaterialStyle(R.layout.layout_menu_background_selector);
 
         // Init Firebase Analytics on GA4.
-        FirebaseAnalytics.getInstance(this);
+        GoogleServicesHelper.initFirebase(this);
 
         // Init listeners.
         for (Integer id : viewIdToSettingItemMap.keySet()) {
@@ -73,25 +72,12 @@ public class MenuBackgroundSelectorActivity extends BaseMaterialActivity {
     public boolean onOptionsItemSelected(MenuItem menuItem) {
         if (menuItem.getItemId() == android.R.id.home) {
             onBackPressed();
-        }
-        else if (menuItem.getItemId() == R.id.action_find) {
-            if (Build.VERSION.SDK_INT >= 19) {
-                Intent intent = new Intent();
-                intent.setAction(Intent.ACTION_OPEN_DOCUMENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("image/*");
-                startActivityForResult(intent, 1);
-            } else {
-                // load custom image
-                Intent i = new Intent(this, FilePickerActivity.class);
-                i.putExtra(FilePickerActivity.EXTRA_ALLOW_MULTIPLE, false);
-                i.putExtra(FilePickerActivity.EXTRA_ALLOW_CREATE_DIR, true);
-                i.putExtra(FilePickerActivity.EXTRA_MODE, FilePickerActivity.MODE_FILE);
-                i.putExtra(FilePickerActivity.EXTRA_START_PATH,
-                        GlobalConfig.pathPickedSave == null || GlobalConfig.pathPickedSave.length() == 0 ?
-                                Environment.getExternalStorageDirectory().getPath() : GlobalConfig.pathPickedSave);
-                startActivityForResult(i, 0);
-            }
+        } else if (menuItem.getItemId() == R.id.action_find) {
+            Intent intent = new Intent();
+            intent.setAction(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            startActivityForResult(intent, 0);
         }
         return super.onOptionsItemSelected(menuItem);
     }
@@ -106,24 +92,6 @@ public class MenuBackgroundSelectorActivity extends BaseMaterialActivity {
         }
 
         if (requestCode == 0) {
-            // get ttf path
-            if (data.getBooleanExtra(FilePickerActivity.EXTRA_ALLOW_MULTIPLE, false)) {
-                ClipData clip = data.getClipData();
-                if (clip != null) {
-                    for (int i = 0; i < clip.getItemCount(); i++) {
-                        Uri uri = clip.getItemAt(i).getUri();
-                        // Do something with the URI
-                        runSaveCustomMenuBackground(uri.toString().replaceAll("file://", ""));
-                    }
-                }
-            } else {
-                Uri uri = data.getData();
-                // Do something with the URI
-                if (uri != null) {
-                    runSaveCustomMenuBackground(uri.toString().replaceAll("file://", ""));
-                }
-            }
-        } else if (requestCode == 1) {
             // API >= 19, from System file picker.
             Uri mediaUri = data.getData();
             if (mediaUri == null || mediaUri.getPath() == null) {
@@ -135,7 +103,7 @@ public class MenuBackgroundSelectorActivity extends BaseMaterialActivity {
                 LightCache.copyFile(getApplicationContext().getContentResolver().openInputStream(mediaUri), copiedFilePath, true);
                 runSaveCustomMenuBackground(copiedFilePath.replaceAll("file://", ""));
             } catch (FileNotFoundException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("MenuBackgroundSelectorActivity.onActivityResult", e);
                 Toast.makeText(this, "Exception: " + e, Toast.LENGTH_SHORT).show();
                 // Failed to copy. Just ignore it.
             }
@@ -154,7 +122,7 @@ public class MenuBackgroundSelectorActivity extends BaseMaterialActivity {
                 Bitmap bitmap = BitmapFactory.decodeFile(path, options);
                 if(bitmap == null) throw new Exception("PictureDecodeFailedException");
             } catch(Exception e) {
-                e.printStackTrace();
+                CrashReporter.recordException("MenuBackgroundSelectorActivity.runSaveCustomMenuBackground", e);
                 Toast.makeText(this, "Exception: " + e, Toast.LENGTH_SHORT).show();
                 return;
             }

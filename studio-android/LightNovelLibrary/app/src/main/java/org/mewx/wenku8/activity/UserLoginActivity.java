@@ -11,19 +11,19 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.afollestad.materialdialogs.GravityEnum;
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
-import com.google.firebase.analytics.FirebaseAnalytics;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 
 import org.mewx.wenku8.MyApp;
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.global.GlobalConfig;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.global.api.Wenku8Error;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8Error;
 import org.mewx.wenku8.util.LightCache;
-import org.mewx.wenku8.util.LightNetwork;
-import org.mewx.wenku8.util.LightUserSession;
+import org.mewx.wenku8.network.LightNetwork;
+import org.mewx.wenku8.util.ProgressDialogHelper;
+import org.mewx.wenku8.network.LightUserSession;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.ByteArrayOutputStream;
 
@@ -43,7 +43,7 @@ public class UserLoginActivity extends BaseMaterialActivity {
         initMaterialStyle(R.layout.layout_user_login);
 
         // Init Firebase Analytics on GA4.
-        FirebaseAnalytics.getInstance(this);
+        GoogleServicesHelper.initFirebase(this);
 
         // get views
         etUserNameOrEmail = findViewById(R.id.edit_username_or_email);
@@ -53,8 +53,8 @@ public class UserLoginActivity extends BaseMaterialActivity {
 
         // listeners
         tvLogin.setOnClickListener(v -> {
-            if(etUserNameOrEmail.getText().toString().length() == 0 || etUserNameOrEmail.getText().toString().length() > 30
-                    || etPassword.getText().toString().length() == 0 || etPassword.getText().toString().length() > 30) {
+            if(etUserNameOrEmail.getText().toString().isEmpty() || etUserNameOrEmail.getText().toString().length() > 30
+                    || etPassword.getText().toString().isEmpty() || etPassword.getText().toString().length() > 30) {
                 Toast.makeText(UserLoginActivity.this, getResources().getString(R.string.system_info_fill_not_complete), Toast.LENGTH_SHORT).show();
                 return;
             }
@@ -64,8 +64,9 @@ public class UserLoginActivity extends BaseMaterialActivity {
             alt.execute(etUserNameOrEmail.getText().toString(), etPassword.getText().toString());
         });
 
-        tvRegister.setOnClickListener(v -> new MaterialDialog.Builder(UserLoginActivity.this)
-                .onPositive((dialog, which) -> {
+        tvRegister.setOnClickListener(v -> new MaterialAlertDialogBuilder(UserLoginActivity.this)
+                .setMessage(R.string.dialog_content_verify_register)
+                .setPositiveButton(R.string.dialog_positive_ok, (dialog, which) -> {
                     // show browser list
                     Intent intent = new Intent(Intent.ACTION_VIEW);
                     intent.setData(Uri.parse(Wenku8API.REGISTER_URL));
@@ -73,30 +74,20 @@ public class UserLoginActivity extends BaseMaterialActivity {
                     Intent chooser = Intent.createChooser(intent, title);
                     startActivity(chooser);
                 })
-                .theme(Theme.LIGHT)
-                .backgroundColorRes(R.color.dlgBackgroundColor)
-                .contentColorRes(R.color.dlgContentColor)
-                .positiveColorRes(R.color.dlgPositiveButtonColor)
-                .negativeColorRes(R.color.dlgNegativeButtonColor)
-                .content(R.string.dialog_content_verify_register)
-                .contentGravity(GravityEnum.CENTER)
-                .positiveText(R.string.dialog_positive_ok)
-                .negativeText(R.string.dialog_negative_pass)
+                .setNegativeButton(R.string.dialog_negative_pass, null)
                 .show());
     }
 
     private class AsyncLoginTask extends AsyncTask<String, Integer, Wenku8Error.ErrorCode> {
-        private MaterialDialog md = null;
+        private ProgressDialogHelper md = null;
         private Wenku8Error.ErrorCode we = Wenku8Error.ErrorCode.ERROR_DEFAULT;
 
         @Override
         protected void onPreExecute() {
             super.onPreExecute();
-            md = new MaterialDialog.Builder(UserLoginActivity.this)
-                    .theme(Theme.LIGHT)
-                    .content(R.string.system_logging_in)
-                    .progress(true, 0)
-                    .show();
+            md = ProgressDialogHelper.show(UserLoginActivity.this,
+                    R.string.system_logging_in,
+                    /* indeterminate= */ true, /* cancelable= */ false, /* cancelListener= */ null);
         }
 
         @Override
@@ -105,10 +96,10 @@ public class UserLoginActivity extends BaseMaterialActivity {
             try {
                 Thread.sleep(500);
             } catch (InterruptedException e) {
-                e.printStackTrace();
+                CrashReporter.recordException("UserLoginActivity.doInBackground", e);
             }
 
-            we = LightUserSession.doLoginFromGiven(params[0], params[1]);
+            we = LightUserSession.doLoginFromGiven(params[0], params[1], GlobalConfig::saveUserInfoSet);
             if(we == Wenku8Error.ErrorCode.SYSTEM_1_SUCCEEDED) {
                 // fetch avatar
                 byte[] b = LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, Wenku8API.getUserAvatar());
@@ -132,7 +123,14 @@ public class UserLoginActivity extends BaseMaterialActivity {
         protected void onPostExecute(Wenku8Error.ErrorCode i) {
             super.onPostExecute(i);
 
-            md.dismiss();
+            // Dismissed ahead of the guard: ProgressDialogHelper.dismiss() is already safe on
+            // a gone window, and skipping it would leak the dialog rather than crash on it.
+            if (md != null) {
+                md.dismiss();
+            }
+
+            if (isFinishing() || isDestroyed()) return;
+
             switch(i) {
                 case SYSTEM_1_SUCCEEDED:
                     Toast.makeText(MyApp.getContext(), getResources().getString(R.string.system_logged), Toast.LENGTH_SHORT).show();

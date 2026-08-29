@@ -5,9 +5,9 @@ import android.content.Intent;
 import android.graphics.LinearGradient;
 import android.graphics.Shader;
 import android.os.AsyncTask;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import androidx.appcompat.app.AppCompatActivity;
 import android.util.Log;
 import android.util.TypedValue;
@@ -21,19 +21,21 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
-import com.google.firebase.analytics.FirebaseAnalytics;
+import org.mewx.wenku8.util.AsyncTaskTracker;
+import org.mewx.wenku8.util.CrashReporter;
+import org.mewx.wenku8.util.ProgressDialogHelper;
+import org.mewx.wenku8.util.GoogleServicesHelper;
 import com.nostra13.universalimageloader.core.ImageLoader;
 
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.component.ScrollViewNoFling;
 import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.global.api.OldNovelContentParser;
-import org.mewx.wenku8.global.api.VolumeList;
-import org.mewx.wenku8.global.api.Wenku8API;
-import org.mewx.wenku8.util.LightNetwork;
+import org.mewx.wenku8.reader.ChapterContentLoader;
+import org.mewx.wenku8.api.Wenku8API;
+import org.mewx.wenku8.network.LightNetwork;
 
+import java.io.FileNotFoundException;
 import java.io.UnsupportedEncodingException;
 import java.util.List;
 
@@ -48,8 +50,10 @@ public class VerticalReaderActivity extends AppCompatActivity {
     // private vars
     private String from = "";
     private int aid, cid;
-    private VolumeList volumeList= null; // for extended function
-    private MaterialDialog pDialog = null;
+    // No volume here. This screen renders from aid/cid alone -- the field it used to keep was
+    // assigned from the Intent and never read -- so it takes no vid and loads no index.
+    private ProgressDialogHelper pDialog = null;
+    private final AsyncTaskTracker tracker = new AsyncTaskTracker();
     private ScrollViewNoFling svTextListLayout = null;
     private LinearLayout TextListLayout = null;
     private List<OldNovelContentParser.NovelContent> nc = null;
@@ -66,17 +70,25 @@ public class VerticalReaderActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // This is the one Activity that does not extend BaseMaterialActivity, so it does not
+        // inherit the breadcrumbs and has to record them itself.
+        CrashReporter.setScreen(getClass().getSimpleName(),
+                savedInstanceState == null ? "onCreate" : "onCreate(restored)");
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         setContentView(R.layout.layout_vertical_reader_temp);
 
         // Init Firebase Analytics on GA4.
-        FirebaseAnalytics.getInstance(this);
+        GoogleServicesHelper.initFirebase(this);
 
         // fetch values
         aid = getIntent().getIntExtra("aid", 1);
-        volumeList = (VolumeList) getIntent().getSerializableExtra("volume");
         cid = getIntent().getIntExtra("cid",1);
         from = getIntent().getStringExtra("from");
+
+        // Crash report context; see the equivalent block in Wenku8ReaderActivityV1.
+        CrashReporter.setKey(CrashReporter.Keys.READER_MODE, "vertical");
+        CrashReporter.setKey(CrashReporter.Keys.NOVEL_AID, aid);
+        CrashReporter.setKey(CrashReporter.Keys.CHAPTER_CID, cid);
 
         // UIL setting
         if(ImageLoader.getInstance() == null || !ImageLoader.getInstance().isInited()) {
@@ -146,6 +158,7 @@ public class VerticalReaderActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        CrashReporter.setScreen(getClass().getSimpleName(), "onResume");
 
         // set navigation bar status, remember to disable "setNavigationBarTintEnabled"
         final int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -153,45 +166,33 @@ public class VerticalReaderActivity extends AppCompatActivity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-        // This work only for android 4.4+
-        if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            getWindow().getDecorView().setSystemUiVisibility(flags);
+        getWindow().getDecorView().setSystemUiVisibility(flags);
 
-            // Code below is to handle presses of Volume up or Volume down.
-            // Without this, after pressing volume buttons, the navigation bar will
-            // show up and won't hide
-            final View decorView = getWindow().getDecorView();
-            decorView.setOnSystemUiVisibilityChangeListener(visibility -> {
-                if((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
-                    decorView.setSystemUiVisibility(flags);
-                }
-            });
-        }
+        // Code below is to handle presses of Volume up or Volume down.
+        // Without this, after pressing volume buttons, the navigation bar will
+        // show up and won't hide
+        final View decorView = getWindow().getDecorView();
+        decorView.setOnSystemUiVisibilityChangeListener(visibility -> {
+            if((visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                decorView.setSystemUiVisibility(flags);
+            }
+        });
     }
 
     private void getNovelContent() {
         ContentValues cv = Wenku8API.getNovelContent(aid, cid, GlobalConfig.getCurrentLang());
 
-        final asyncNovelContentTask ast = new asyncNovelContentTask();
+        final asyncNovelContentTask ast = tracker.track(new asyncNovelContentTask());
         ast.execute(cv);
 
-        pDialog = new MaterialDialog.Builder(this)
-                .theme(Theme.LIGHT)
-                .title(R.string.sorry_old_engine_preprocess)
-                .content(R.string.sorry_old_engine_merging)
-                .progress(false, 1, true)
-                .cancelable(true)
-                .cancelListener(dialog -> {
+        pDialog = ProgressDialogHelper.show(this,
+                getString(R.string.sorry_old_engine_merging),
+                /* indeterminate= */ false, /* cancelable= */ true,
+                /* cancelListener= */ dialog -> {
                     ast.cancel(true);
                     pDialog.dismiss();
                     pDialog = null;
-                })
-                .titleColorRes(R.color.default_text_color_black)
-                .show();
-
-        pDialog.setProgress(0);
-        pDialog.setMaxProgress(1);
-        pDialog.show();
+                });
     }
 
     class asyncNovelContentTask extends AsyncTask<ContentValues, Integer, Integer> {
@@ -199,35 +200,61 @@ public class VerticalReaderActivity extends AppCompatActivity {
         @Override
         protected Integer doInBackground(ContentValues... params) {
 
-            try {
-                String xml;
-                if (from.equals(FromLocal))
-                    xml = GlobalConfig.loadFullFileFromSaveFolder("novel", cid + ".xml");
-                else {
-                    byte[] tempXml = LightNetwork.LightHttpPostConnection(
-                            Wenku8API.BASE_URL, params[0]);
-                    if (tempXml == null)
-                        return -100;
-                    xml = new String(tempXml, "UTF-8");
-                }
+            // Shares the cache-or-network decision with Wenku8ReaderActivityV1 via
+            // ChapterContentLoader, where it has JVM tests. This reader keeps its own coarser
+            // mapping: an empty response and an unparseable one are both -100 here.
+            ChapterContentLoader.Result result = ChapterContentLoader.load(
+                    from.equals(FromLocal),
+                    () -> GlobalConfig.loadFullFileFromSaveFolder("novel", cid + ".xml"),
+                    () -> LightNetwork.LightHttpPostConnection(Wenku8API.BASE_URL, params[0]),
+                    size -> {
+                        if (pDialog != null) {
+                            pDialog.setMaxProgress(size);
+                        }
+                    },
+                    this::reportUnusableCache);
 
-                nc = OldNovelContentParser.parseNovelContent(xml, pDialog);
-                if (nc == null || nc.size() == 0) {
+            nc = result.content;
+
+            switch (result.outcome) {
+                case LOADED_FROM_CACHE:
+                case LOADED_FROM_NETWORK:
+                    return 0;
+                case ENCODING_UNSUPPORTED:
+                    CrashReporter.recordException("VerticalReaderActivity.doInBackground",
+                            new UnsupportedEncodingException("UTF-8"));
+                    return -1;
+                case EMPTY_RESPONSE:
+                case PARSE_FAILED:
                     Log.e("MewX-Main", "getNullFromParser (NovelContentParser.parseNovelContent(xml);)");
-
                     // network error or parse failed
                     return -100;
-                }
-
-                return 0;
-            } catch (UnsupportedEncodingException e) {
-                e.printStackTrace();
+                case NETWORK_UNAVAILABLE:
+                default:
+                    return -100;
             }
-            return -1;
+        }
+
+        private void reportUnusableCache(ChapterContentLoader.CacheProblem problem) {
+            CrashReporter.recordException("VerticalReaderActivity.cachedChapterUnusable",
+                    new FileNotFoundException("Cached chapter " + cid + " was "
+                            + (problem == ChapterContentLoader.CacheProblem.MISSING_OR_EMPTY
+                                    ? "missing or empty" : "unparseable")
+                            + "; refetching from the network"));
         }
 
         @Override
         protected void onPostExecute(Integer result) {
+            // This task inflates the whole chapter into the layout below. It is exactly as
+            // slow as the network is, so leaving the reader mid-fetch used to land here on a
+            // destroyed Activity.
+            //
+            // No dialog dismissal is hoisted above this guard, unlike the other screens: the
+            // inflation loop below drives pDialog.setProgress(), so dismissing it up here
+            // would blank the progress display for the whole of it. onDestroy() already
+            // dismisses pDialog, so returning early cannot leak it.
+            if (isFinishing() || isDestroyed()) return;
+
             if (result == -100) {
                     Toast.makeText(VerticalReaderActivity.this,
                             getResources().getString(R.string.system_network_error),
@@ -276,7 +303,7 @@ public class VerticalReaderActivity extends AppCompatActivity {
 
                         // async loader
                         final String imgFileName = GlobalConfig.generateImageFileNameByURL(nc.get(i).content);
-                        final String path = GlobalConfig.getAvailableNovelContentImagePath(imgFileName);
+                        final String path = GlobalConfig.getExistingNovelContentImagePath(imgFileName);
 
                         if (path != null) {
                             ImageLoader.getInstance().displayImage(
@@ -297,11 +324,16 @@ public class VerticalReaderActivity extends AppCompatActivity {
                                 protected String doInBackground(String... params) {
                                     GlobalConfig.saveNovelContentImage(params[0]);
                                     String name = GlobalConfig.generateImageFileNameByURL(params[0]);
-                                    return GlobalConfig.getAvailableNovelContentImagePath(name);
+                                    return GlobalConfig.getExistingNovelContentImagePath(name);
                                 }
 
                                 @Override
                                 protected void onPostExecute(final String result) {
+                                    // The image is already saved to disk by doInBackground, so
+                                    // nothing is lost by skipping the display when the reader
+                                    // has gone.
+                                    if (isFinishing() || isDestroyed()) return;
+
                                     ImageLoader.getInstance().displayImage(
                                             "file://" + result, tempIV);
 
@@ -314,7 +346,7 @@ public class VerticalReaderActivity extends AppCompatActivity {
                                 }
 
                             }
-                            asyncDownloadImage async = new asyncDownloadImage();
+                            asyncDownloadImage async = tracker.track(new asyncDownloadImage());
                             async.execute(nc.get(i).content);
                         }
 
@@ -330,7 +362,7 @@ public class VerticalReaderActivity extends AppCompatActivity {
             // show dialog
             if (GlobalConfig.getReadSavesRecord(cid, TextListLayout.getMeasuredHeight()) > 100) {
                 // set scroll view
-                Handler handler = new Handler();
+                Handler handler = new Handler(Looper.getMainLooper());
                 handler.postDelayed(runnableScroll, 200);
                 Log.d(VerticalReaderActivity.class.getSimpleName(), "Scroll to = " + GlobalConfig.getReadSavesRecord(cid, TextListLayout.getMeasuredHeight()));
             }
@@ -352,6 +384,9 @@ public class VerticalReaderActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // Before super, so nothing is still able to deliver into a half-torn-down Activity.
+        // The image downloads finish writing their files regardless; see AsyncTaskTracker.
+        tracker.cancelAll();
         super.onDestroy();
 
         if (pDialog != null)

@@ -1,5 +1,5 @@
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FMewX%2Flight-novel-library_Wenku8_Android.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FMewX%2Flight-novel-library_Wenku8_Android?ref=badge_shield)
-[![Build Status](https://travis-ci.com/MewX/light-novel-library_Wenku8_Android.svg?branch=master)](https://travis-ci.com/MewX/light-novel-library_Wenku8_Android)
+[![Android CI](https://github.com/MewX/light-novel-library_Wenku8_Android/actions/workflows/android-ci.yml/badge.svg)](https://github.com/MewX/light-novel-library_Wenku8_Android/actions/workflows/android-ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/MewX/light-novel-library_Wenku8_Android/badge.svg)](https://coveralls.io/github/MewX/light-novel-library_Wenku8_Android)
 :point_left: **HISTORICAL ISSUE AND THAT'S WHAT WE ALL KNOW** :sob:
 
@@ -7,6 +7,8 @@
 
 如果您想打赏我用爱发电的代码，可以点击这个链接帮我充电 ❤️：
 [!["充电按钮"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/mewx)
+
+如果你走失了，可以来TG群：https://t.me/wk8app
 
 文档目录
 ==========

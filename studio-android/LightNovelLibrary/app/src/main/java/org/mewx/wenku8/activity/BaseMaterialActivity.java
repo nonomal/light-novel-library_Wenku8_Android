@@ -1,15 +1,20 @@
 package org.mewx.wenku8.activity;
 
+import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
-import android.os.Build;
+import android.os.Bundle;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
-
-import com.readystatesoftware.systembartint.SystemBarTintManager;
+import androidx.core.content.ContextCompat;
+import androidx.fragment.app.Fragment;
+import androidx.fragment.app.FragmentManager;
 
 import org.mewx.wenku8.R;
+import org.mewx.wenku8.network.LightUserSession;
+import org.mewx.wenku8.util.CrashReporter;
 
 /**
  * The base activity that handles Material Design style status bar or so.
@@ -27,14 +32,55 @@ public class BaseMaterialActivity extends AppCompatActivity {
         DARK,
     }
 
-    private SystemBarTintManager tintManager;
     private Toolbar toolbar;
 
-    protected SystemBarTintManager getTintManager() {
-        if (tintManager == null) {
-            tintManager = new SystemBarTintManager(this);
-        }
-        return tintManager;
+    private final FragmentManager.FragmentLifecycleCallbacks fragmentBreadcrumbs =
+            new FragmentManager.FragmentLifecycleCallbacks() {
+                @Override
+                public void onFragmentResumed(@NonNull FragmentManager fm, @NonNull Fragment f) {
+                    CrashReporter.log(f.getClass().getSimpleName() + "#onResume");
+                }
+
+                @Override
+                public void onFragmentDetached(@NonNull FragmentManager fm, @NonNull Fragment f) {
+                    // The interesting one: an AsyncTask finishing after this point is exactly the
+                    // "touched a view on a detached Fragment" crash.
+                    CrashReporter.log(f.getClass().getSimpleName() + "#onDetach");
+                }
+            };
+
+    public BaseMaterialActivity() {
+        super();
+    }
+
+    /**
+     * Breadcrumbs for every Activity that inherits from this one. The point is that a crash
+     * report shows the screen sequence that led to it, and in particular whether the Activity
+     * was being recreated (savedInstanceState != null) -- the rotation and process-death paths
+     * are the ones most likely to be at fault.
+     */
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        CrashReporter.setScreen(getClass().getSimpleName(),
+                savedInstanceState == null ? "onCreate" : "onCreate(restored)");
+
+        // One registration covers every Fragment this Activity hosts, child fragments included,
+        // which beats copying an onResume() override into each of them and means Fragments added
+        // later are traced for free. Fragment attach/detach matters here because most of the
+        // background loading -- and therefore most of the lifecycle-related crashes -- happens in
+        // Fragments rather than in the Activity.
+        getSupportFragmentManager().registerFragmentLifecycleCallbacks(fragmentBreadcrumbs, true);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        CrashReporter.setScreen(getClass().getSimpleName(), "onResume");
+        // Refreshed here rather than at each login/logout call site: the session is static state
+        // mutated from several places including a background heartbeat, and sampling it on every
+        // screen entry cannot fall out of sync the way four separate hooks would.
+        CrashReporter.setLoggedIn(LightUserSession.getLogStatus());
     }
 
     protected Toolbar getToolbar() {
@@ -42,6 +88,20 @@ public class BaseMaterialActivity extends AppCompatActivity {
             toolbar = findViewById(R.id.toolbar_actionbar);
         }
         return toolbar;
+    }
+
+    /**
+     * Sets the status bar color to black with the given alpha (0.0 = transparent, 1.0 = opaque).
+     */
+    protected void setStatusBarAlpha(float alpha) {
+        getWindow().setStatusBarColor(Color.argb((int) (alpha * 255), 0, 0, 0));
+    }
+
+    /**
+     * Sets the navigation bar color to black with the given alpha (0.0 = transparent, 1.0 = opaque).
+     */
+    protected void setNavigationBarAlpha(float alpha) {
+        getWindow().setNavigationBarColor(Color.argb((int) (alpha * 255), 0, 0, 0));
     }
 
     protected void initMaterialStyle(int layoutId) {
@@ -70,30 +130,25 @@ public class BaseMaterialActivity extends AppCompatActivity {
 
             // Default indicator is hamburger.
             if (indicatorStyle == HomeIndicatorStyle.ARROW) {
-                final Drawable upArrow = getResources().getDrawable(R.drawable.ic_svg_back);
+                final Drawable upArrow = ContextCompat.getDrawable(this, R.drawable.ic_svg_back);
                 if (upArrow != null) {
-                    upArrow.setColorFilter(getResources().getColor(R.color.default_white), PorterDuff.Mode.SRC_ATOP);
+                    upArrow.setColorFilter(ContextCompat.getColor(this, R.color.default_white), PorterDuff.Mode.SRC_ATOP);
                 }
                 getSupportActionBar().setHomeAsUpIndicator(upArrow);
             }
         }
 
-        // change status bar color tint, and this require SDK16
-        // Android API 22 has more effects on status bar, so ignore
-        // create our manager instance after the content view is set
-        tintManager = getTintManager();
-        tintManager.setStatusBarTintEnabled(true);
-        tintManager.setNavigationBarTintEnabled(true);
-        tintManager.setTintAlpha(statusBarColor == StatusBarColor.DARK ? 0.9f : 0.15f);
-        tintManager.setNavigationBarAlpha(statusBarColor == StatusBarColor.DARK ? 0.8f : 0.0f);
-        // set all color
-        tintManager.setTintColor(getResources().getColor(android.R.color.black));
+        // Set status bar color with a black tint overlay.
+        float statusBarAlpha = statusBarColor == StatusBarColor.DARK ? 0.9f : 0.15f;
+        setStatusBarAlpha(statusBarAlpha);
 
-        // set Navigation bar color
-        if (Build.VERSION.SDK_INT >= 21 && statusBarColor != StatusBarColor.DARK) {
-            final int statusBarColorId = statusBarColor == StatusBarColor.PRIMARY ?
+        // Set navigation bar color.
+        if (statusBarColor == StatusBarColor.DARK) {
+            setNavigationBarAlpha(0.8f);
+        } else {
+            final int navBarColorId = statusBarColor == StatusBarColor.PRIMARY ?
                     R.color.myNavigationColor : R.color.myNavigationColorWhite;
-            getWindow().setNavigationBarColor(getResources().getColor(statusBarColorId));
+            getWindow().setNavigationBarColor(ContextCompat.getColor(this, navBarColorId));
         }
     }
 

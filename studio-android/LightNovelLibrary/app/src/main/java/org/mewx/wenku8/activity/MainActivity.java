@@ -14,6 +14,7 @@ import android.util.Log;
 import android.view.Menu;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
@@ -21,20 +22,24 @@ import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentTransaction;
 
-import com.afollestad.materialdialogs.MaterialDialog;
-import com.afollestad.materialdialogs.Theme;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.firebase.analytics.FirebaseAnalytics;
 import com.nostra13.universalimageloader.core.ImageLoader;
 
+import org.mewx.wenku8.MyApp;
 import org.mewx.wenku8.R;
 import org.mewx.wenku8.async.CheckAppNewVersion;
 import org.mewx.wenku8.async.UpdateNotificationMessage;
+import org.mewx.wenku8.fragment.FavFragment;
 import org.mewx.wenku8.fragment.NavigationDrawerFragment;
 import org.mewx.wenku8.global.GlobalConfig;
-import org.mewx.wenku8.global.api.Wenku8API;
+import org.mewx.wenku8.api.Wenku8API;
 import org.mewx.wenku8.util.LightCache;
-import org.mewx.wenku8.util.LightUserSession;
+import org.mewx.wenku8.network.LightUserSession;
+import org.mewx.wenku8.util.GoogleServicesHelper;
+import org.mewx.wenku8.util.ProgressDialogHelper;
 import org.mewx.wenku8.util.SaveFileMigration;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -55,7 +60,6 @@ public class MainActivity extends BaseMaterialActivity {
     // Below request codes can be any value.
     private static final int REQUEST_WRITE_EXTERNAL = 100;
     private static final int REQUEST_READ_EXTERNAL = 101;
-    private static final int REQUEST_READ_MEDIA_IMAGES = 102;
     private static final int REQUEST_READ_EXTERNAL_SAVES = 103;
 
     private static final AtomicBoolean NEW_VERSION_CHECKED = new AtomicBoolean(false);
@@ -81,16 +85,10 @@ public class MainActivity extends BaseMaterialActivity {
 
     private void initialApp() {
         // load language
-        Locale locale;
-        switch (GlobalConfig.getCurrentLang()) {
-            case TC:
-                locale = Locale.TRADITIONAL_CHINESE;
-                break;
-            case SC:
-            default:
-                locale = Locale.SIMPLIFIED_CHINESE;
-                break;
-        }
+        Locale locale = switch (GlobalConfig.getCurrentLang()) {
+            case TC -> Locale.TRADITIONAL_CHINESE;
+            case SC -> Locale.SIMPLIFIED_CHINESE;
+        };
         Configuration config = new Configuration();
         config.locale = locale;
         Locale.setDefault(locale);
@@ -108,13 +106,7 @@ public class MainActivity extends BaseMaterialActivity {
         }
 
         // Read permissions.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // FIXME: this doesn't work on the first launch yet (it works on the second+ launch somehow).
-            if (missingPermission(Manifest.permission.READ_MEDIA_IMAGES)) {
-                ActivityCompat.requestPermissions(this,
-                        new String[]{Manifest.permission.READ_MEDIA_IMAGES}, REQUEST_READ_MEDIA_IMAGES);
-            }
-        } else {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             if (missingPermission(Manifest.permission.READ_EXTERNAL_STORAGE)) {
                 ActivityCompat.requestPermissions(this,
                         new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_READ_EXTERNAL);
@@ -138,7 +130,14 @@ public class MainActivity extends BaseMaterialActivity {
         }
 
         // execute background action
-        LightUserSession.aiui = new LightUserSession.AsyncInitUserInfo();
+        LightUserSession.aiui = new LightUserSession.AsyncInitUserInfo(getApplicationContext(),
+                /* failureCallback= */ () -> {
+            LightCache.deleteFile(GlobalConfig.getFirstFullUserAccountSaveFilePath());
+            LightCache.deleteFile(GlobalConfig.getSecondFullUserAccountSaveFilePath());
+            LightCache.deleteFile(GlobalConfig.getFirstUserAvatarSaveFilePath());
+            LightCache.deleteFile(GlobalConfig.getSecondUserAvatarSaveFilePath());
+            Toast.makeText(getApplicationContext(), getApplicationContext().getResources().getString(R.string.system_log_info_outofdate), Toast.LENGTH_SHORT).show();
+        }, GlobalConfig::loadUserInfoSet);
         LightUserSession.aiui.execute();
         GlobalConfig.loadAllSetting();
 
@@ -159,26 +158,17 @@ public class MainActivity extends BaseMaterialActivity {
         // The permission issue for Android API 33+.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && SaveFileMigration.migrationEligible()) {
             Log.d(TAG, "startOldSaveMigration: Eligible");
-            new MaterialDialog.Builder(MainActivity.this)
-                    .theme(Theme.LIGHT)
-                    .backgroundColorRes(R.color.dlgBackgroundColor)
-                    .contentColorRes(R.color.dlgContentColor)
-                    .positiveColorRes(R.color.dlgPositiveButtonColor)
-                    .neutralColorRes(R.color.dlgNegativeButtonColor)
-                    .negativeColorRes(R.color.myAccentColor)
-                    .content(R.string.system_save_need_to_migrate)
-                    .positiveText(R.string.dialog_positive_upgrade)
-                    // This neutral text is needed because some users couldn't get system file picker.
-                    .neutralText(R.string.dialog_negative_pass_for_now)
-                    .negativeText(R.string.dialog_negative_never)
-                    .onPositive((unused1, unused2) -> {
+            new MaterialAlertDialogBuilder(MainActivity.this)
+                    .setMessage(R.string.system_save_need_to_migrate)
+                    .setPositiveButton(R.string.dialog_positive_upgrade, (unused1, unused2) -> {
                         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
                         intent.addCategory(Intent.CATEGORY_DEFAULT);
                         startActivityForResult(Intent.createChooser(intent, "Choose directory"), REQUEST_READ_EXTERNAL_SAVES);
                     })
-                    // Do nothing for onNeutral.
-                    .onNegative((dialog, which) -> SaveFileMigration.markMigrationCompleted())
-                    .cancelable(false)
+                    // This neutral text is needed because some users couldn't get system file picker.
+                    .setNeutralButton(R.string.dialog_negative_pass_for_now, null)
+                    .setNegativeButton(R.string.dialog_negative_never, (dialog, which) -> SaveFileMigration.markMigrationCompleted())
+                    .setCancelable(false)
                     .show();
 
             // Return early to wait for the permissions grant on the directory.
@@ -190,12 +180,9 @@ public class MainActivity extends BaseMaterialActivity {
     }
 
     private void runExternalSaveMigration() {
-        MaterialDialog progressDialog = new MaterialDialog.Builder(MainActivity.this)
-                .theme(Theme.LIGHT)
-                .content(R.string.system_save_upgrading)
-                .progress(false, 1, false)
-                .cancelable(false)
-                .show();
+        ProgressDialogHelper progressDialog = ProgressDialogHelper.show(MainActivity.this,
+                getString(R.string.system_save_upgrading),
+                /* indeterminate= */ false, /* cancelable= */ false, /* cancelListener= */ null);
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         Handler handler = new Handler(Looper.getMainLooper()); // Handles the UI works.
@@ -206,7 +193,7 @@ public class MainActivity extends BaseMaterialActivity {
             // Analysis.
             Bundle saveMigrationFilesTotalParams = new Bundle();
             saveMigrationFilesTotalParams.putString("count", "" + filesToCopy.size());
-            mFirebaseAnalytics.logEvent("save_migration_files_total", saveMigrationFilesTotalParams);
+            GoogleServicesHelper.logEvent(mFirebaseAnalytics, "save_migration_files_total", saveMigrationFilesTotalParams);
 
             if (filesToCopy.isEmpty()) {
                 Log.d(TAG, "Empty list of files to copy");
@@ -229,7 +216,7 @@ public class MainActivity extends BaseMaterialActivity {
                     }
                 } catch (FileNotFoundException e) {
                     failedFiles++;
-                    e.printStackTrace();
+                    CrashReporter.recordException("MainActivity.migrateFiles", e);
                 }
                 progress++;
 
@@ -249,21 +236,16 @@ public class MainActivity extends BaseMaterialActivity {
             // Analysis.
             Bundle saveMigrationFilesFailedParams = new Bundle();
             saveMigrationFilesFailedParams.putString("failed", "" + finalFailedFiles);
-            mFirebaseAnalytics.logEvent("save_migration_files_failed", saveMigrationFilesFailedParams);
+            GoogleServicesHelper.logEvent(mFirebaseAnalytics, "save_migration_files_failed", saveMigrationFilesFailedParams);
 
             handler.post(() -> {
                 SaveFileMigration.markMigrationCompleted();
                 progressDialog.dismiss();
 
-                new MaterialDialog.Builder(MainActivity.this)
-                        .theme(Theme.LIGHT)
-                        .backgroundColorRes(R.color.dlgBackgroundColor)
-                        .contentColorRes(R.color.dlgContentColor)
-                        .positiveColorRes(R.color.dlgPositiveButtonColor)
-                        .content(R.string.system_save_migrated, filesToCopy.size(), finalFailedFiles)
-                        .positiveText(R.string.dialog_positive_sure)
-                        .onPositive((unused1, unused2) -> reloadApp())
-                        .cancelable(false)
+                new MaterialAlertDialogBuilder(MainActivity.this)
+                        .setMessage(getString(R.string.system_save_migrated, filesToCopy.size(), finalFailedFiles))
+                        .setPositiveButton(R.string.dialog_positive_sure, (unused1, unused2) -> reloadApp())
+                        .setCancelable(false)
                         .show();
             });
         });
@@ -276,7 +258,7 @@ public class MainActivity extends BaseMaterialActivity {
         initialApp();
 
         // Init Firebase Analytics on GA4.
-        mFirebaseAnalytics = FirebaseAnalytics.getInstance(this);
+        mFirebaseAnalytics = GoogleServicesHelper.initFirebase(this);
 
         // UIL setting
         if (ImageLoader.getInstance() == null || !ImageLoader.getInstance().isInited()) {
@@ -299,8 +281,32 @@ public class MainActivity extends BaseMaterialActivity {
                 // start search activity
                 startActivity(new Intent(MainActivity.this, SearchActivity.class));
                 overridePendingTransition(R.anim.fade_in, R.anim.hold); // fade in animation
+            } else if (item.getItemId() == R.id.action_bookshelf_search) {
+                startActivity(new Intent(MainActivity.this, BookshelfSearchActivity.class));
+                overridePendingTransition(R.anim.fade_in, R.anim.hold); // as the site-wide search
+            } else if (item.getItemId() == R.id.action_check_updates) {
+                FavFragment fav = currentBookshelf();
+                if (fav != null) fav.checkUpdates();
+            } else if (item.getItemId() == R.id.action_force_updates) {
+                FavFragment fav = currentBookshelf();
+                if (fav != null) fav.forceUpdates();
             }
             return true;
+        });
+
+        // Register the new Back Press Callback
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                // Close the Drawer if it's open.
+                if (mNavigationDrawerFragment != null && mNavigationDrawerFragment.isDrawerOpen()) {
+                    mNavigationDrawerFragment.closeDrawer();
+                }
+                // Otherwise, trigger double-click exit.
+                else {
+                    exitBy2Click();
+                }
+            }
         });
     }
 
@@ -332,6 +338,7 @@ public class MainActivity extends BaseMaterialActivity {
                 case FAV:
                     if (getSupportActionBar() != null)
                         getSupportActionBar().setTitle(getResources().getString(R.string.main_menu_fav));
+                    getMenuInflater().inflate(R.menu.menu_fav, menu);
                     break;
                 case CONFIG:
                     if (getSupportActionBar() != null)
@@ -344,6 +351,21 @@ public class MainActivity extends BaseMaterialActivity {
         }
 
         return true;
+    }
+
+    /**
+     * The bookshelf, when it is the fragment on screen.
+     *
+     * <p>Looked up by the tag {@link #changeFragment} attaches it under, rather than held in a
+     * field: the Fragment is replaced on every navigation, so a field would go stale and keep the
+     * old one alive.
+     *
+     * @return the bookshelf, or null if something else is showing
+     */
+    @Nullable
+    private FavFragment currentBookshelf() {
+        Fragment current = getSupportFragmentManager().findFragmentByTag("fragment");
+        return current instanceof FavFragment ? (FavFragment) current : null;
     }
 
     /**
@@ -389,12 +411,6 @@ public class MainActivity extends BaseMaterialActivity {
                     // The result will fall through.
                     break;
                 }
-            case REQUEST_READ_MEDIA_IMAGES:
-                if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    reloadApp();
-                } else {
-                    Toast.makeText(this, getResources().getText(R.string.missing_permission), Toast.LENGTH_LONG).show();
-                }
         }
     }
 
@@ -402,10 +418,6 @@ public class MainActivity extends BaseMaterialActivity {
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_READ_EXTERNAL_SAVES && resultCode == Activity.RESULT_OK && data != null) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) {
-                return;
-            }
-
             Uri wenku8Uri = data.getData();
             String wenku8Path = wenku8Uri.getPath();
             if (!wenku8Uri.getLastPathSegment().endsWith("wenku8") || wenku8Path.contains("DCIM") || wenku8Path.contains("Picture")) {
@@ -415,30 +427,21 @@ public class MainActivity extends BaseMaterialActivity {
                 Bundle saveMigrationParams = new Bundle();
                 saveMigrationParams.putString("path", wenku8Path);
                 saveMigrationParams.putString("valid_path", "false");
-                mFirebaseAnalytics.logEvent("save_migration_path_selection", saveMigrationParams);
+                GoogleServicesHelper.logEvent(mFirebaseAnalytics, "save_migration_path_selection", saveMigrationParams);
 
-                new MaterialDialog.Builder(MainActivity.this)
-                        .theme(Theme.LIGHT)
-                        .backgroundColorRes(R.color.dlgBackgroundColor)
-                        .contentColorRes(R.color.dlgContentColor)
-                        .positiveColorRes(R.color.dlgPositiveButtonColor)
-                        .neutralColorRes(R.color.dlgNegativeButtonColor)
-                        .negativeColorRes(R.color.myAccentColor)
-                        .content(R.string.dialog_content_wrong_path, wenku8Path.replace("/tree/primary:", "/"))
-                        .positiveText(R.string.dialog_positive_retry)
-                        .neutralText(R.string.dialog_negative_pass_for_now)
-                        .negativeText(R.string.dialog_negative_never)
-                        .onPositive((unused1, unused2) -> reloadApp())
-                        // Do nothing for onNeutral.
-                        .onNegative((dialog, which) -> SaveFileMigration.markMigrationCompleted())
-                        .cancelable(false)
+                new MaterialAlertDialogBuilder(MainActivity.this)
+                        .setMessage(getString(R.string.dialog_content_wrong_path, wenku8Path.replace("/tree/primary:", "/")))
+                        .setPositiveButton(R.string.dialog_positive_retry, (unused1, unused2) -> reloadApp())
+                        .setNeutralButton(R.string.dialog_negative_pass_for_now, null)
+                        .setNegativeButton(R.string.dialog_negative_never, (dialog, which) -> SaveFileMigration.markMigrationCompleted())
+                        .setCancelable(false)
                         .show();
                 return;
             } else {
                 Bundle saveMigrationParams = new Bundle();
                 saveMigrationParams.putString("path", wenku8Path);
                 saveMigrationParams.putString("valid_path", "true");
-                mFirebaseAnalytics.logEvent("save_migration_path_selection", saveMigrationParams);
+                GoogleServicesHelper.logEvent(mFirebaseAnalytics, "save_migration_path_selection", saveMigrationParams);
             }
 
             getContentResolver().takePersistableUriPermission(wenku8Uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -448,14 +451,6 @@ public class MainActivity extends BaseMaterialActivity {
             SaveFileMigration.overrideExternalPath(wenku8Uri);
             runExternalSaveMigration();
         }
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (mNavigationDrawerFragment.isDrawerOpen())
-            mNavigationDrawerFragment.closeDrawer();
-        else
-            exitBy2Click();
     }
 
     private void exitBy2Click() {

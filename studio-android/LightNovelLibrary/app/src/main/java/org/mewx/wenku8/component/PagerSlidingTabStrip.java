@@ -45,6 +45,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import org.mewx.wenku8.R;
+import org.mewx.wenku8.util.CrashReporter;
 
 import java.util.Locale;
 
@@ -54,11 +55,11 @@ public class PagerSlidingTabStrip extends HorizontalScrollView {
     private static final float HALF_TRANSP = 0.5f;
 
     public interface CustomTabProvider {
-        public View getCustomTabView(ViewGroup parent, int position);
+        View getCustomTabView(ViewGroup parent, int position);
     }
 
     public interface OnTabReselectedListener {
-        public void onTabReselected(int position);
+        void onTabReselected(int position);
     }
 
     // @formatter:off
@@ -257,7 +258,6 @@ public class PagerSlidingTabStrip extends HorizontalScrollView {
         updateTabStyles();
         getViewTreeObserver().addOnGlobalLayoutListener(new OnGlobalLayoutListener() {
 
-            @SuppressWarnings("deprecation")
             @SuppressLint("NewApi")
             @Override
             public void onGlobalLayout() {
@@ -310,14 +310,8 @@ public class PagerSlidingTabStrip extends HorizontalScrollView {
                 if (tabTextColor != null) {
                     tab_title.setTextColor(tabTextColor);
                 }
-                // setAllCaps() is only available from API 14, so the upper case is made manually if we are on a
-                // pre-ICS-build
                 if (textAllCaps) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                        tab_title.setAllCaps(true);
-                    } else {
-                        tab_title.setText(tab_title.getText().toString().toUpperCase(locale));
-                    }
+                    tab_title.setAllCaps(true);
                 }
             }
         }
@@ -553,7 +547,7 @@ public class PagerSlidingTabStrip extends HorizontalScrollView {
                     pager.getAdapter().unregisterDataSetObserver(adapterObserver);
                 }
                 catch (IllegalStateException e) {
-                    e.printStackTrace();
+                    CrashReporter.recordException("PagerSlidingTabStrip.onDetachedFromWindow", e);
                 }
                 adapterObserver.setAttached(false);
             }

@@ -6,6 +6,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.widget.Scroller;
 
+import org.mewx.wenku8.global.GlobalConfig;
 import org.mewx.wenku8.reader.slider.SlidingAdapter;
 import org.mewx.wenku8.reader.slider.SlidingLayout;
 
@@ -123,10 +124,12 @@ public class OverlappedSlider extends BaseSlider {
                     }
                     if (mMode == MODE_MOVE) {
                         mVelocityTracker.computeCurrentVelocity(1000, ViewConfiguration.getMaximumFlingVelocity());
-                        if (mDirection == MOVE_TO_LEFT) {
-                            mScrollerView.scrollTo(distance, 0);
-                        } else {
-                            mScrollerView.scrollTo(screenWidth + distance, 0);
+                        if (!GlobalConfig.isEinkModeEnabled()) {
+                            if (mDirection == MOVE_TO_LEFT) {
+                                mScrollerView.scrollTo(distance, 0);
+                            } else {
+                                mScrollerView.scrollTo(screenWidth + distance, 0);
+                            }
                         }
                     } else {
                         final int scrollX = mScrollerView.getScrollX();
@@ -156,30 +159,52 @@ public class OverlappedSlider extends BaseSlider {
 			 */
 
                 int time = 500;
+                boolean isEinkMode = GlobalConfig.isEinkModeEnabled();
+                if (isEinkMode) {
+                    time = 0;
+                }
 
                 if (mMode == MODE_MOVE && mDirection == MOVE_TO_LEFT) {
                     if (scrollX > limitDistance || mVelocityValue < -time) {
                         // 手指向左移动，可以翻屏幕
                         mTouchResult = MOVE_TO_LEFT;
                         if (mVelocityValue < -time) {
-                            time = 200;
+                            time = isEinkMode ? 0 : 200;
                         }
-                        mScroller.startScroll(scrollX, 0, screenWidth - scrollX, 0, time);
+                        if (isEinkMode) {
+                            mScrollerView.scrollTo(screenWidth, 0);
+                            invalidate();
+                            moveToNext();
+                            mTouchResult = MOVE_NO_RESULT;
+                        } else {
+                            mScroller.startScroll(scrollX, 0, screenWidth - scrollX, 0, time);
+                        }
                     } else {
                         mTouchResult = MOVE_NO_RESULT;
-                        mScroller.startScroll(scrollX, 0, -scrollX, 0, time);
+                        if (!isEinkMode) {
+                            mScroller.startScroll(scrollX, 0, -scrollX, 0, time);
+                        }
                     }
                 } else if (mMode == MODE_MOVE && mDirection == MOVE_TO_RIGHT) {
                     if ((screenWidth - scrollX) > limitDistance || mVelocityValue > time) {
                         // 手指向右移动，可以翻屏幕
                         mTouchResult = MOVE_TO_RIGHT;
                         if (mVelocityValue > time) {
-                            time = 250;
+                            time = isEinkMode ? 0 : 250;
                         }
-                        mScroller.startScroll(scrollX, 0, -scrollX, 0, time);
+                        if (isEinkMode) {
+                            mScrollerView.scrollTo(0, 0);
+                            invalidate();
+                            moveToPrevious();
+                            mTouchResult = MOVE_NO_RESULT;
+                        } else {
+                            mScroller.startScroll(scrollX, 0, -scrollX, 0, time);
+                        }
                     } else {
                         mTouchResult = MOVE_NO_RESULT;
-                        mScroller.startScroll(scrollX, 0, screenWidth - scrollX, 0, time);
+                        if (!isEinkMode) {
+                            mScroller.startScroll(scrollX, 0, screenWidth - scrollX, 0, time);
+                        }
                     }
                 }
                 resetVariables();
@@ -221,6 +246,8 @@ public class OverlappedSlider extends BaseSlider {
             mSlidingLayout.addView(newNextView, 0);
             newNextView.scrollTo(0, 0);
         }
+
+        mSlidingLayout.slideSelected(getAdapter().getCurrent());
 
         return true;
     }
@@ -299,10 +326,14 @@ public class OverlappedSlider extends BaseSlider {
 
         mScrollerView = getCurrentShowView();
 
-        mScroller.startScroll(0, 0, screenWidth, 0, 500);
-        mTouchResult = MOVE_TO_LEFT;
-
-        mSlidingLayout.slideScrollStateChanged(MOVE_TO_LEFT);
+        if (GlobalConfig.isEinkModeEnabled()) {
+            mScrollerView.scrollTo(screenWidth, 0);
+            moveToNext();
+        } else {
+            mScroller.startScroll(0, 0, screenWidth, 0, 500);
+            mTouchResult = MOVE_TO_LEFT;
+            mSlidingLayout.slideScrollStateChanged(MOVE_TO_LEFT);
+        }
 
         invalidate();
     }
@@ -314,10 +345,14 @@ public class OverlappedSlider extends BaseSlider {
 
         mScrollerView = getTopView();
 
-        mScroller.startScroll(screenWidth, 0, -screenWidth, 0, 500);
-        mTouchResult = MOVE_TO_RIGHT;
-
-        mSlidingLayout.slideScrollStateChanged(MOVE_TO_RIGHT);
+        if (GlobalConfig.isEinkModeEnabled()) {
+            mScrollerView.scrollTo(0, 0);
+            moveToPrevious();
+        } else {
+            mScroller.startScroll(screenWidth, 0, -screenWidth, 0, 500);
+            mTouchResult = MOVE_TO_RIGHT;
+            mSlidingLayout.slideScrollStateChanged(MOVE_TO_RIGHT);
+        }
 
         invalidate();
     }
